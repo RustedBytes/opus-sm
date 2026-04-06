@@ -11,6 +11,7 @@ and split Parquet rows into speech and music outputs.
 - supports embedded audio stored as:
   - WAV bytes
   - Ogg Opus bytes
+  - MP3 bytes
 - runs the Opus speech/music discriminator frame by frame
 - prints framewise music probabilities
 - supports smoothed probabilities before segmentation
@@ -33,7 +34,7 @@ Other fields in the schema are preserved when writing output.
 For `strip-music`, the output Parquet keeps the same schema and rewrites only:
 
 - `audio.bytes`
-- `audio.path` unchanged
+- `audio.path`
 
 For `separate-sm`, the speech and music output files keep the same schema and row structure as
 the input, with rows routed by the configured row-decision rule.
@@ -124,7 +125,30 @@ Behavior:
 - output audio is written back in the same container family as the input:
   - WAV in, WAV out
   - Ogg Opus in, Ogg Opus out
+  - MP3 in, WAV out
 - WAV output preserves the original WAV sample format and bit depth when supported
+
+### VAD
+
+Segment each row into speech-only chunks and emit one output row per chunk.
+
+```bash
+cargo run -- vad \
+  --input data/parquet-dir \
+  --output data/vad-chunks \
+  --threshold 0.8 \
+  --min-speech-seconds 0.5 \
+  --max-speech-seconds 30.0
+```
+
+Behavior:
+
+- one output row is written for each detected speech chunk
+- `audio.bytes` is replaced with the chunk audio payload
+- `audio.path` is rewritten as `..._chunkN.ext`
+- chunk `duration` is recomputed when a top-level `duration` column exists
+- top-level `transcription` is replaced with `"-"` when that column exists
+- for MP3 input rows, chunk audio is written as WAV and chunk paths end in `.wav`
 
 ### Separate Speech/Music
 
@@ -176,6 +200,7 @@ Main exported convenience functions:
 - `classify_bytes`
 - `music_score_bytes`
 - `strip_music_bytes`
+- `vad_chunks_bytes`
 
 Main exported analysis types:
 
@@ -247,6 +272,13 @@ fn run(audio_bytes: &[u8]) -> Result<()> {
 - `--speech-output <PATH>`: destination file or root directory for speech rows
 - `--music-output <PATH>`: destination file or root directory for music rows
 
+### `vad`
+
+- `--output <PATH>`: output file or root directory for chunk rows
+- `--fade-ms <FLOAT>`: fade-in/fade-out duration applied at chunk boundaries
+- `--min-speech-seconds <FLOAT>`: drop detected speech chunks shorter than this
+- `--max-speech-seconds <FLOAT>`: split long speech chunks to at most this duration
+
 ## Implementation Notes
 
 - frame analysis uses Opus’s internal `music_prob` analysis path via a small C shim
@@ -260,6 +292,8 @@ fn run(audio_bytes: &[u8]) -> Result<()> {
 
 - Ogg Opus decode uses `pre_skip` and also trims the decoded tail using the final granule position
 - Ogg Opus output writes final-page granule positions based on the true output sample count
+- MP3 decode uses `symphonia`
+- MP3 input is analyzed directly, but rewritten audio is emitted as WAV because the tool does not encode MP3 output
 - WAV output preserves the original WAV container format where supported:
   - 32-bit float
   - 8-bit PCM
@@ -271,7 +305,7 @@ fn run(audio_bytes: &[u8]) -> Result<()> {
 
 - Ogg Opus decode/encode currently supports mono and stereo only
 - audio above stereo is analyzed by mono downmix rather than per-channel classification
-- the tool expects embedded audio bytes to be either WAV or Ogg Opus
+- MP3 input is supported for decoding only; rewritten MP3 rows are emitted as WAV
 
 ## Verification
 
@@ -282,4 +316,5 @@ cargo check
 cargo run -- --help
 cargo run -- segment --help
 cargo run -- strip-music --help
+cargo test vad_accepts_mp3_rows_from_radio_free_dataset -- --nocapture
 ```
