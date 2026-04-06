@@ -450,6 +450,7 @@ fn format_name(format: AudioFormat) -> String {
     match format {
         AudioFormat::Wav(_) => "wav".to_owned(),
         AudioFormat::OggOpus => "ogg_opus".to_owned(),
+        AudioFormat::Mp3 => "mp3".to_owned(),
     }
 }
 

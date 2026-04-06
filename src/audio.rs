@@ -3,7 +3,15 @@ use std::io::Cursor;
 use anyhow::{Context, Result, anyhow, bail};
 use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
 use ogg::PacketReader;
-use opus::{Application, Channels, Decoder, Encoder, Signal};
+use opus::{Application, Channels, Decoder, Encoder, Signal as OpusSignal};
+use symphonia::core::audio::{AudioBufferRef, SampleBuffer, Signal};
+use symphonia::core::codecs::DecoderOptions;
+use symphonia::core::errors::Error as SymphoniaError;
+use symphonia::core::formats::FormatOptions;
+use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
+use symphonia::core::meta::MetadataOptions;
+use symphonia::core::probe::Hint;
+use symphonia::default::{get_codecs, get_probe};
 
 use crate::analyze::{
     AnalysisOptions, DecisionOptions, FrameProbability, analyze_interleaved, speech_ranges,
@@ -23,6 +31,7 @@ pub struct WavEncoding {
 pub enum AudioFormat {
     Wav(WavEncoding),
     OggOpus,
+    Mp3,
 }
 
 #[derive(Debug, Clone)]
@@ -38,8 +47,12 @@ pub fn decode_audio(bytes: &[u8]) -> Result<DecodedAudio> {
         decode_wav(bytes)
     } else if bytes.starts_with(b"OggS") {
         decode_ogg_opus(bytes)
+    } else if bytes.starts_with(b"ID3") || is_mpeg_audio_frame(bytes) {
+        decode_mp3(bytes)
     } else {
-        bail!("unsupported embedded audio format");
+        bail!(
+            "unsupported embedded audio format (expected RIFF/WAV, OggS/Opus, or MP3/ID3)"
+        );
     }
 }
 
@@ -177,7 +190,16 @@ pub fn encode_audio(audio: &DecodedAudio, samples: &[f32]) -> Result<Vec<u8>> {
     match audio.format {
         AudioFormat::Wav(wav) => encode_wav(samples, wav.spec),
         AudioFormat::OggOpus => encode_ogg_opus(samples, audio.channels),
+        AudioFormat::Mp3 => encode_wav(samples, default_wav_spec(audio.sample_rate, audio.channels)?),
     }
+}
+
+pub fn rewrite_encoded_audio_path(path: &str, format: AudioFormat) -> String {
+    let target_ext = match format {
+        AudioFormat::Wav(_) | AudioFormat::Mp3 => "wav",
+        AudioFormat::OggOpus => "opus",
+    };
+    rewrite_path_extension(path, target_ext)
 }
 
 fn decode_wav(bytes: &[u8]) -> Result<DecodedAudio> {
@@ -281,6 +303,92 @@ fn decode_ogg_opus(bytes: &[u8]) -> Result<DecodedAudio> {
     })
 }
 
+fn decode_mp3(bytes: &[u8]) -> Result<DecodedAudio> {
+    let mut hint = Hint::new();
+    hint.with_extension("mp3");
+
+    let source = Cursor::new(bytes.to_vec());
+    let stream = MediaSourceStream::new(Box::new(source), MediaSourceStreamOptions::default());
+    let mut probed = get_probe()
+        .format(
+            &hint,
+            stream,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        )
+        .context("probe mp3 payload")?;
+    let track = probed
+        .format
+        .default_track()
+        .ok_or_else(|| anyhow!("missing default audio track"))?;
+    let mut decoder = get_codecs()
+        .make(&track.codec_params, &DecoderOptions::default())
+        .context("create mp3 decoder")?;
+
+    let sample_rate = track
+        .codec_params
+        .sample_rate
+        .ok_or_else(|| anyhow!("mp3 track is missing sample rate"))?;
+    let channels = track
+        .codec_params
+        .channels
+        .map(|value| value.count())
+        .ok_or_else(|| anyhow!("mp3 track is missing channel count"))?;
+    if channels == 0 {
+        bail!("mp3 track has zero channels");
+    }
+
+    let mut samples = Vec::new();
+    loop {
+        let packet = match probed.format.next_packet() {
+            Ok(packet) => packet,
+            Err(SymphoniaError::IoError(error))
+                if error.kind() == std::io::ErrorKind::UnexpectedEof =>
+            {
+                break;
+            }
+            Err(SymphoniaError::ResetRequired) => {
+                bail!("mp3 decoder reset is not supported");
+            }
+            Err(error) => return Err(error).context("read mp3 packet"),
+        };
+
+        let decoded = match decoder.decode(&packet) {
+            Ok(decoded) => decoded,
+            Err(SymphoniaError::DecodeError(_)) => continue,
+            Err(SymphoniaError::ResetRequired) => {
+                bail!("mp3 decoder reset is not supported");
+            }
+            Err(error) => return Err(error).context("decode mp3 packet"),
+        };
+
+        match decoded {
+            AudioBufferRef::F32(buffer) => {
+                append_planar_samples(
+                    &mut samples,
+                    buffer.spec().channels.count(),
+                    buffer.frames(),
+                    |channel, frame| *buffer.chan(channel).get(frame).unwrap_or(&0.0),
+                );
+            }
+            other => {
+                let spec = *other.spec();
+                let duration = other.capacity() as u64;
+                let mut sample_buffer = SampleBuffer::<f32>::new(duration, spec);
+                sample_buffer.copy_interleaved_ref(other);
+                samples.extend_from_slice(sample_buffer.samples());
+            }
+        }
+    }
+
+    Ok(DecodedAudio {
+        samples,
+        sample_rate,
+        channels,
+        format: AudioFormat::Mp3,
+    })
+}
+
 fn encode_wav(samples: &[f32], spec: WavSpec) -> Result<Vec<u8>> {
     let mut cursor = Cursor::new(Vec::new());
     {
@@ -334,6 +442,16 @@ fn encode_wav(samples: &[f32], spec: WavSpec) -> Result<Vec<u8>> {
     Ok(cursor.into_inner())
 }
 
+fn default_wav_spec(sample_rate: u32, channels: usize) -> Result<WavSpec> {
+    let channels = u16::try_from(channels).context("wav output channel count exceeds u16")?;
+    Ok(WavSpec {
+        channels,
+        sample_rate,
+        bits_per_sample: 16,
+        sample_format: SampleFormat::Int,
+    })
+}
+
 fn encode_ogg_opus(samples: &[f32], channels: usize) -> Result<Vec<u8>> {
     if channels == 0 || channels > 2 {
         bail!("Opus output supports mono and stereo only");
@@ -347,7 +465,7 @@ fn encode_ogg_opus(samples: &[f32], channels: usize) -> Result<Vec<u8>> {
     let mut encoder = Encoder::new(OPUS_SAMPLE_RATE, opus_channels, Application::Audio)
         .context("create opus encoder")?;
     encoder
-        .set_signal(Signal::Voice)
+        .set_signal(OpusSignal::Voice)
         .context("set opus signal hint")?;
 
     let frame_len = OPUS_FRAME_SAMPLES * channels;
@@ -447,6 +565,39 @@ fn append_with_fades(
             for channel in 0..channels {
                 slice[base + channel] *= gain;
             }
+        }
+    }
+}
+
+fn rewrite_path_extension(path: &str, ext: &str) -> String {
+    let input = std::path::Path::new(path);
+    let stem = input
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("audio");
+    let file_name = format!("{stem}.{ext}");
+    match input.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => {
+            parent.join(file_name).to_string_lossy().into_owned()
+        }
+        _ => file_name,
+    }
+}
+
+fn is_mpeg_audio_frame(bytes: &[u8]) -> bool {
+    bytes.len() >= 2 && bytes[0] == 0xFF && (bytes[1] & 0xE0) == 0xE0
+}
+
+fn append_planar_samples(
+    output: &mut Vec<f32>,
+    channels: usize,
+    frames: usize,
+    mut sample_at: impl FnMut(usize, usize) -> f32,
+) {
+    output.reserve(frames.saturating_mul(channels));
+    for frame in 0..frames {
+        for channel in 0..channels {
+            output.push(sample_at(channel, frame));
         }
     }
 }

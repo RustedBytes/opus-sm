@@ -16,7 +16,7 @@ use parquet::arrow::arrow_writer::ArrowWriter;
 use rayon::prelude::*;
 
 use crate::analyze::{AnalysisOptions, DecisionOptions, SegmentKind, row_is_music, segment};
-use crate::audio::{analyze_audio, decode_audio, encode_audio, strip_music};
+use crate::audio::{analyze_audio, decode_audio, encode_audio, rewrite_encoded_audio_path, strip_music};
 use crate::cli::{AnalyzeArgs, DecisionArgs, SegmentArgs, SeparateSmArgs, StripMusicArgs};
 
 pub fn run_analyze(args: &AnalyzeArgs) -> Result<()> {
@@ -267,7 +267,7 @@ fn process_strip_row(
     let encoded = encode_audio(&decoded, &stripped).with_context(|| format!("encode row {row}"))?;
     Ok(StripRowOutput {
         bytes: Some(encoded),
-        path: original_path,
+        path: original_path.map(|path| rewrite_encoded_audio_path(&path, decoded.format)),
     })
 }
 

@@ -7,7 +7,7 @@ use parquet::arrow::arrow_writer::ArrowWriter;
 use rayon::prelude::*;
 
 use crate::analyze::{AnalysisOptions, DecisionOptions, SegmentKind, segment};
-use crate::audio::{analyze_audio, decode_audio, encode_audio, speech_chunks};
+use crate::audio::{analyze_audio, decode_audio, encode_audio, rewrite_encoded_audio_path, speech_chunks};
 use crate::cli::VadArgs;
 use crate::parquet_io::{
     AudioColumns, analysis_options, binary_value, collect_parquet_files, decision_options,
@@ -145,7 +145,7 @@ pub fn vad_bytes(
                 start_seconds,
                 end_seconds,
                 duration_seconds: end_seconds - start_seconds,
-                path: rewrite_chunk_path(&base_path, chunk_cursor),
+                path: rewrite_chunk_path(&base_path, decoded.format, chunk_cursor),
                 bytes,
             });
             chunk_cursor += 1;
@@ -224,8 +224,13 @@ fn process_vad_row(
     .with_context(|| format!("extract speech chunks row {row}"))
 }
 
-pub(crate) fn rewrite_chunk_path(path: &str, chunk_index: usize) -> String {
-    let input = Path::new(path);
+pub(crate) fn rewrite_chunk_path(
+    path: &str,
+    format: crate::audio::AudioFormat,
+    chunk_index: usize,
+) -> String {
+    let rewritten = rewrite_encoded_audio_path(path, format);
+    let input = Path::new(&rewritten);
     let stem = input
         .file_stem()
         .and_then(|value| value.to_str())
@@ -252,5 +257,53 @@ pub(crate) fn default_chunk_basename(format: crate::audio::AudioFormat) -> Strin
     match format {
         crate::audio::AudioFormat::Wav(_) => "audio.wav".to_owned(),
         crate::audio::AudioFormat::OggOpus => "audio.opus".to_owned(),
+        crate::audio::AudioFormat::Mp3 => "audio.wav".to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::vad_bytes;
+    use crate::analyze::{AnalysisOptions, DecisionOptions, RowDecisionMode};
+    use crate::parquet_io::{AudioColumns, binary_value, open_reader, string_value};
+
+    #[test]
+    fn vad_accepts_mp3_rows_from_radio_free_dataset() {
+        let input = Path::new("testdata/radio-free/train-00384-of-00385.parquet");
+        let mut reader = open_reader(input, 1).expect("open parquet reader");
+        let batch = reader
+            .next()
+            .expect("first batch exists")
+            .expect("first batch is valid");
+        let audio = AudioColumns::new(&batch).expect("extract audio columns");
+        let bytes = binary_value(audio.bytes.as_ref(), 0)
+            .expect("read bytes")
+            .expect("row 0 has audio bytes");
+        let source_path = string_value(audio.path.as_ref(), 0)
+            .expect("read path")
+            .expect("row 0 has audio path");
+
+        let chunks = vad_bytes(
+            bytes,
+            AnalysisOptions { smooth_window: 1 },
+            DecisionOptions {
+                threshold: 0.8,
+                low_threshold: 0.8,
+                high_threshold: 0.8,
+                min_music_frames: 0,
+                min_speech_frames: 0,
+                row_decision: RowDecisionMode::Max,
+                row_fraction: 0.5,
+            },
+            0.0,
+            Some(0.1),
+            Some(30.0),
+            Some(source_path),
+        )
+        .expect("run vad on embedded mp3 bytes");
+
+        assert!(chunks.iter().all(|chunk| chunk.path.ends_with(".wav")));
     }
 }
