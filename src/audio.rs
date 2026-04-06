@@ -217,9 +217,10 @@ pub fn encode_audio_with_format(
     samples: &[f32],
     output_format: ChunkOutputFormat,
 ) -> Result<Vec<u8>> {
+    let prepared = prepare_chunk_output_samples(audio, samples, output_format)?;
     match resolve_chunk_audio_format(audio, output_format)? {
-        AudioFormat::Wav(wav) => encode_wav(samples, wav.spec),
-        AudioFormat::OggOpus => encode_ogg_opus(samples, audio.channels),
+        AudioFormat::Wav(wav) => encode_wav(&prepared, wav.spec),
+        AudioFormat::OggOpus => encode_ogg_opus(&prepared, audio.channels),
         AudioFormat::Mp3 => unreachable!("chunk output format does not resolve to MP3"),
     }
 }
@@ -256,6 +257,17 @@ pub fn chunk_output_sample_rate(
         AudioFormat::Wav(_) => audio.sample_rate,
         AudioFormat::Mp3 => unreachable!("chunk output format does not resolve to MP3"),
     })
+}
+
+pub fn chunk_output_duration_seconds(
+    audio: &DecodedAudio,
+    samples: &[f32],
+    output_format: ChunkOutputFormat,
+) -> Result<f64> {
+    let prepared = prepare_chunk_output_samples(audio, samples, output_format)?;
+    let sample_rate = chunk_output_sample_rate(audio, output_format)?;
+    let frames = prepared.len().div_ceil(audio.channels);
+    Ok(frames as f64 / sample_rate as f64)
 }
 
 fn decode_wav(bytes: &[u8]) -> Result<DecodedAudio> {
@@ -528,6 +540,29 @@ fn resolve_chunk_audio_format(
         })),
         ChunkOutputFormat::OggOpus => Ok(AudioFormat::OggOpus),
     }
+}
+
+fn prepare_chunk_output_samples(
+    audio: &DecodedAudio,
+    samples: &[f32],
+    output_format: ChunkOutputFormat,
+) -> Result<Vec<f32>> {
+    Ok(match resolve_chunk_audio_format(audio, output_format)? {
+        AudioFormat::Wav(_) => samples.to_vec(),
+        AudioFormat::OggOpus => {
+            if audio.sample_rate == OPUS_SAMPLE_RATE {
+                samples.to_vec()
+            } else {
+                resample_linear_interleaved(
+                    samples,
+                    audio.channels,
+                    audio.sample_rate,
+                    OPUS_SAMPLE_RATE,
+                )
+            }
+        }
+        AudioFormat::Mp3 => unreachable!("chunk output format does not resolve to MP3"),
+    })
 }
 
 fn encode_ogg_opus(samples: &[f32], channels: usize) -> Result<Vec<u8>> {

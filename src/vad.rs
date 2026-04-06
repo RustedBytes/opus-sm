@@ -8,8 +8,9 @@ use rayon::prelude::*;
 
 use crate::analyze::{AnalysisOptions, DecisionOptions, SegmentKind, segment};
 use crate::audio::{
-    ChunkOutputFormat, analyze_audio, chunk_output_sample_rate, decode_audio, default_chunk_output_path,
-    encode_audio_with_format, rewrite_chunk_output_path, speech_chunks,
+    ChunkOutputFormat, analyze_audio, chunk_output_duration_seconds, chunk_output_sample_rate,
+    decode_audio, default_chunk_output_path, encode_audio_with_format, rewrite_chunk_output_path,
+    speech_chunks,
 };
 use crate::cli::VadArgs;
 use crate::parquet_io::{
@@ -161,11 +162,13 @@ pub fn vad_bytes(
             };
             let chunk = &chunk_audio[chunk_cursor];
             let bytes = encode_audio_with_format(&decoded, chunk, options.chunk_format)?;
+            let duration_seconds =
+                chunk_output_duration_seconds(&decoded, chunk, options.chunk_format)?;
             chunks.push(VadChunk {
                 index: chunk_cursor,
                 start_seconds,
                 end_seconds,
-                duration_seconds: end_seconds - start_seconds,
+                duration_seconds,
                 sampling_rate: chunk_sample_rate,
                 path: rewrite_chunk_path(&base_path, chunk_cursor),
                 bytes,
