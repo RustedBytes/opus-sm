@@ -16,6 +16,7 @@ pub use api::{
     music_score_bytes, segment_bytes, strip_music_bytes, vad_chunks_bytes,
 };
 pub use audio::{
-    AudioFormat, DecodedAudio, WavEncoding, decode_audio, encode_audio, speech_chunks, strip_music,
+    AudioFormat, ChunkOutputFormat, DecodedAudio, WavEncoding, decode_audio, encode_audio,
+    speech_chunks, strip_music,
 };
 pub use vad::{VadChunk, vad_bytes};

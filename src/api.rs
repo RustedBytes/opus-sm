@@ -3,7 +3,9 @@ use anyhow::Result;
 use crate::analyze::{
     AnalysisOptions, DecisionOptions, FrameProbability, Segment, music_score, row_is_music, segment,
 };
-use crate::audio::{DecodedAudio, analyze_audio, decode_audio, encode_audio, strip_music};
+use crate::audio::{
+    ChunkOutputFormat, DecodedAudio, analyze_audio, decode_audio, encode_audio, strip_music,
+};
 use crate::vad::{VadChunk, vad_bytes};
 
 #[derive(Debug, Clone)]
@@ -84,6 +86,7 @@ pub fn vad_chunks_bytes(
     fade_ms: f32,
     min_speech_seconds: Option<f32>,
     max_speech_seconds: Option<f32>,
+    chunk_format: ChunkOutputFormat,
     source_path: Option<&str>,
 ) -> Result<Vec<VadChunk>> {
     vad_bytes(
@@ -93,6 +96,7 @@ pub fn vad_chunks_bytes(
         fade_ms,
         min_speech_seconds,
         max_speech_seconds,
+        chunk_format,
         source_path,
     )
 }

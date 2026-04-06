@@ -137,6 +137,7 @@ cargo run -- vad \
   --input data/parquet-dir \
   --output data/vad-chunks \
   --threshold 0.8 \
+  --chunk-format ogg-opus \
   --min-speech-seconds 0.5 \
   --max-speech-seconds 30.0
 ```
@@ -148,7 +149,12 @@ Behavior:
 - `audio.path` is rewritten as `..._chunkN.ext`
 - chunk `duration` is recomputed when a top-level `duration` column exists
 - top-level `transcription` is replaced with `"-"` when that column exists
-- for MP3 input rows, chunk audio is written as WAV and chunk paths end in `.wav`
+- `--chunk-format auto` preserves the current default behavior:
+  - WAV input chunks stay WAV
+  - Ogg Opus input chunks stay Ogg Opus
+  - MP3 input chunks are written as WAV
+- `--chunk-format wav` forces WAV chunk output
+- `--chunk-format ogg-opus` forces Ogg Opus chunk output
 
 ### Separate Speech/Music
 
@@ -278,6 +284,7 @@ fn run(audio_bytes: &[u8]) -> Result<()> {
 - `--fade-ms <FLOAT>`: fade-in/fade-out duration applied at chunk boundaries
 - `--min-speech-seconds <FLOAT>`: drop detected speech chunks shorter than this
 - `--max-speech-seconds <FLOAT>`: split long speech chunks to at most this duration
+- `--chunk-format <FORMAT>`: chunk output container, one of `auto`, `wav`, `ogg-opus`
 
 ## Implementation Notes
 
@@ -293,7 +300,7 @@ fn run(audio_bytes: &[u8]) -> Result<()> {
 - Ogg Opus decode uses `pre_skip` and also trims the decoded tail using the final granule position
 - Ogg Opus output writes final-page granule positions based on the true output sample count
 - MP3 decode uses `symphonia`
-- MP3 input is analyzed directly, but rewritten audio is emitted as WAV because the tool does not encode MP3 output
+- MP3 input is analyzed directly, but rewritten audio is emitted as WAV or Ogg Opus because the tool does not encode MP3 output
 - WAV output preserves the original WAV container format where supported:
   - 32-bit float
   - 8-bit PCM

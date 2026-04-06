@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use clap::{Args, Parser, Subcommand};
 
 use crate::analyze::RowDecisionMode;
+use crate::audio::ChunkOutputFormat;
 
 #[derive(Debug, Parser)]
 #[command(author, version, about)]
@@ -144,4 +145,7 @@ pub struct VadArgs {
 
     #[arg(long)]
     pub max_speech_seconds: Option<f32>,
+
+    #[arg(long, value_enum, default_value_t = ChunkOutputFormat::Auto)]
+    pub chunk_format: ChunkOutputFormat,
 }

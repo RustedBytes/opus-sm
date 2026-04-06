@@ -1,6 +1,7 @@
 use std::io::Cursor;
 
 use anyhow::{Context, Result, anyhow, bail};
+use clap::ValueEnum;
 use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
 use ogg::PacketReader;
 use opus::{Application, Channels, Decoder, Encoder, Signal as OpusSignal};
@@ -32,6 +33,14 @@ pub enum AudioFormat {
     Wav(WavEncoding),
     OggOpus,
     Mp3,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ChunkOutputFormat {
+    Auto,
+    Wav,
+    #[value(name = "ogg-opus")]
+    OggOpus,
 }
 
 #[derive(Debug, Clone)]
@@ -200,6 +209,41 @@ pub fn rewrite_encoded_audio_path(path: &str, format: AudioFormat) -> String {
         AudioFormat::OggOpus => "opus",
     };
     rewrite_path_extension(path, target_ext)
+}
+
+pub fn encode_audio_with_format(
+    audio: &DecodedAudio,
+    samples: &[f32],
+    output_format: ChunkOutputFormat,
+) -> Result<Vec<u8>> {
+    match resolve_chunk_audio_format(audio, output_format)? {
+        AudioFormat::Wav(wav) => encode_wav(samples, wav.spec),
+        AudioFormat::OggOpus => encode_ogg_opus(samples, audio.channels),
+        AudioFormat::Mp3 => unreachable!("chunk output format does not resolve to MP3"),
+    }
+}
+
+pub fn rewrite_chunk_output_path(
+    path: &str,
+    audio: &DecodedAudio,
+    output_format: ChunkOutputFormat,
+) -> Result<String> {
+    Ok(rewrite_encoded_audio_path(
+        path,
+        resolve_chunk_audio_format(audio, output_format)?,
+    ))
+}
+
+pub fn default_chunk_output_path(
+    audio: &DecodedAudio,
+    output_format: ChunkOutputFormat,
+) -> Result<String> {
+    let file_name = match resolve_chunk_audio_format(audio, output_format)? {
+        AudioFormat::Wav(_) => "audio.wav",
+        AudioFormat::OggOpus => "audio.opus",
+        AudioFormat::Mp3 => unreachable!("chunk output format does not resolve to MP3"),
+    };
+    Ok(file_name.to_owned())
 }
 
 fn decode_wav(bytes: &[u8]) -> Result<DecodedAudio> {
@@ -450,6 +494,28 @@ fn default_wav_spec(sample_rate: u32, channels: usize) -> Result<WavSpec> {
         bits_per_sample: 16,
         sample_format: SampleFormat::Int,
     })
+}
+
+fn resolve_chunk_audio_format(
+    audio: &DecodedAudio,
+    output_format: ChunkOutputFormat,
+) -> Result<AudioFormat> {
+    match output_format {
+        ChunkOutputFormat::Auto => match audio.format {
+            AudioFormat::Wav(wav) => Ok(AudioFormat::Wav(wav)),
+            AudioFormat::OggOpus => Ok(AudioFormat::OggOpus),
+            AudioFormat::Mp3 => Ok(AudioFormat::Wav(WavEncoding {
+                spec: default_wav_spec(audio.sample_rate, audio.channels)?,
+            })),
+        },
+        ChunkOutputFormat::Wav => Ok(AudioFormat::Wav(WavEncoding {
+            spec: match audio.format {
+                AudioFormat::Wav(wav) => wav.spec,
+                _ => default_wav_spec(audio.sample_rate, audio.channels)?,
+            },
+        })),
+        ChunkOutputFormat::OggOpus => Ok(AudioFormat::OggOpus),
+    }
 }
 
 fn encode_ogg_opus(samples: &[f32], channels: usize) -> Result<Vec<u8>> {

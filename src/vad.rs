@@ -7,13 +7,19 @@ use parquet::arrow::arrow_writer::ArrowWriter;
 use rayon::prelude::*;
 
 use crate::analyze::{AnalysisOptions, DecisionOptions, SegmentKind, segment};
-use crate::audio::{analyze_audio, decode_audio, encode_audio, rewrite_encoded_audio_path, speech_chunks};
+use crate::audio::{
+    ChunkOutputFormat, analyze_audio, decode_audio, default_chunk_output_path,
+    encode_audio_with_format, rewrite_chunk_output_path, speech_chunks,
+};
 use crate::cli::VadArgs;
 use crate::parquet_io::{
     AudioColumns, analysis_options, binary_value, collect_parquet_files, decision_options,
-    empty_like, map_output_path, open_reader, rebuild_batch_with_overrides, string_value, take_rows,
-    validate_optional_seconds,
+    empty_like, map_output_path, open_reader, rebuild_batch_from_indices_with_overrides,
+    string_value, validate_optional_seconds,
 };
+
+const MAX_BINARY_PAYLOAD_PER_BATCH: usize = 1_500_000_000;
+const MAX_STRING_PAYLOAD_PER_BATCH: usize = 1_500_000_000;
 
 #[derive(Debug, Clone)]
 pub struct VadChunk {
@@ -52,16 +58,20 @@ pub fn run_vad(args: &VadArgs) -> Result<()> {
         for batch in &mut reader {
             let batch =
                 batch.with_context(|| format!("read batch from {}", input_path.display()))?;
-            let chunked = vad_batch(
+            let chunked_batches = vad_batches(
                 &batch,
                 analysis,
                 decision,
                 args.strip.fade_ms,
                 args.min_speech_seconds,
                 args.max_speech_seconds,
+                args.chunk_format,
             )
             .with_context(|| format!("run vad in {}", input_path.display()))?;
-            if chunked.num_rows() > 0 {
+            for chunked in chunked_batches {
+                if chunked.num_rows() == 0 {
+                    continue;
+                }
                 writer
                     .write(&chunked)
                     .with_context(|| format!("write batch to {}", output_path.display()))?;
@@ -83,6 +93,7 @@ pub fn vad_bytes(
     fade_ms: f32,
     min_speech_seconds: Option<f32>,
     max_speech_seconds: Option<f32>,
+    chunk_format: ChunkOutputFormat,
     source_path: Option<&str>,
 ) -> Result<Vec<VadChunk>> {
     validate_optional_seconds(min_speech_seconds, "min-speech-seconds")?;
@@ -114,7 +125,9 @@ pub fn vad_bytes(
 
     let base_path = source_path
         .map(ToOwned::to_owned)
-        .unwrap_or_else(|| default_chunk_basename(decoded.format));
+        .map(|path| rewrite_chunk_output_path(&path, &decoded, chunk_format))
+        .transpose()?
+        .unwrap_or(default_chunk_output_path(&decoded, chunk_format)?);
 
     let mut chunks = Vec::new();
     let mut chunk_cursor = 0usize;
@@ -139,13 +152,13 @@ pub fn vad_bytes(
                 None => speech_segment.end_seconds,
             };
             let chunk = &chunk_audio[chunk_cursor];
-            let bytes = encode_audio(&decoded, chunk)?;
+            let bytes = encode_audio_with_format(&decoded, chunk, chunk_format)?;
             chunks.push(VadChunk {
                 index: chunk_cursor,
                 start_seconds,
                 end_seconds,
                 duration_seconds: end_seconds - start_seconds,
-                path: rewrite_chunk_path(&base_path, decoded.format, chunk_cursor),
+                path: rewrite_chunk_path(&base_path, chunk_cursor),
                 bytes,
             });
             chunk_cursor += 1;
@@ -155,48 +168,91 @@ pub fn vad_bytes(
     Ok(chunks)
 }
 
-fn vad_batch(
+fn vad_batches(
     batch: &RecordBatch,
     analysis: AnalysisOptions,
     decision: DecisionOptions,
     fade_ms: f32,
     min_speech_seconds: Option<f32>,
     max_speech_seconds: Option<f32>,
-) -> Result<RecordBatch> {
+    chunk_format: ChunkOutputFormat,
+) -> Result<Vec<RecordBatch>> {
     let audio = AudioColumns::new(batch)?;
     let chunked_rows = (0..batch.num_rows())
         .into_par_iter()
-        .map(|row| process_vad_row(&audio, row, analysis, decision, fade_ms, min_speech_seconds, max_speech_seconds))
+        .map(|row| {
+            process_vad_row(
+                &audio,
+                row,
+                analysis,
+                decision,
+                fade_ms,
+                min_speech_seconds,
+                max_speech_seconds,
+                chunk_format,
+            )
+        })
         .collect::<Vec<_>>();
 
     let mut source_indices = Vec::new();
     let mut bytes_out = Vec::new();
     let mut path_out = Vec::new();
     let mut duration_out = Vec::new();
+    let mut batches = Vec::new();
+    let mut binary_bytes = 0usize;
+    let mut string_bytes = 0usize;
 
     for (row_idx, outputs) in chunked_rows.into_iter().enumerate() {
         for chunk in outputs? {
+            let chunk_binary = chunk.bytes.len();
+            let chunk_string = chunk.path.len();
+            let should_flush = !source_indices.is_empty()
+                && (binary_bytes.saturating_add(chunk_binary) > MAX_BINARY_PAYLOAD_PER_BATCH
+                    || string_bytes.saturating_add(chunk_string) > MAX_STRING_PAYLOAD_PER_BATCH);
+            if should_flush {
+                batches.push(rebuild_batch_from_indices_with_overrides(
+                    batch,
+                    &audio,
+                    &source_indices,
+                    &bytes_out,
+                    &path_out,
+                    Some(&duration_out),
+                    Some("-"),
+                )?);
+                source_indices.clear();
+                bytes_out.clear();
+                path_out.clear();
+                duration_out.clear();
+                binary_bytes = 0;
+                string_bytes = 0;
+            }
             source_indices.push(row_idx as u32);
             bytes_out.push(Some(chunk.bytes));
             path_out.push(Some(chunk.path));
             duration_out.push(chunk.duration_seconds);
+            binary_bytes += chunk_binary;
+            string_bytes += chunk_string;
         }
     }
 
     if source_indices.is_empty() {
-        return empty_like(batch);
+        if batches.is_empty() {
+            return Ok(vec![empty_like(batch)?]);
+        }
+        return Ok(batches);
     }
 
-    let base = take_rows(batch, &source_indices)?;
-    let base_audio = AudioColumns::new(&base)?;
-    rebuild_batch_with_overrides(
-        &base,
-        &base_audio,
+    batches.push(rebuild_batch_from_indices_with_overrides(
+        batch,
+        &audio,
+        &source_indices,
         &bytes_out,
         &path_out,
         Some(&duration_out),
         Some("-"),
-    )
+    )?);
+
+    Ok(batches)
 }
 
 fn process_vad_row(
@@ -207,6 +263,7 @@ fn process_vad_row(
     fade_ms: f32,
     min_speech_seconds: Option<f32>,
     max_speech_seconds: Option<f32>,
+    chunk_format: ChunkOutputFormat,
 ) -> Result<Vec<VadChunk>> {
     let Some(bytes) = binary_value(audio.bytes.as_ref(), row)? else {
         return Ok(Vec::new());
@@ -219,18 +276,14 @@ fn process_vad_row(
         fade_ms,
         min_speech_seconds,
         max_speech_seconds,
+        chunk_format,
         source_path,
     )
     .with_context(|| format!("extract speech chunks row {row}"))
 }
 
-pub(crate) fn rewrite_chunk_path(
-    path: &str,
-    format: crate::audio::AudioFormat,
-    chunk_index: usize,
-) -> String {
-    let rewritten = rewrite_encoded_audio_path(path, format);
-    let input = Path::new(&rewritten);
+pub(crate) fn rewrite_chunk_path(path: &str, chunk_index: usize) -> String {
+    let input = Path::new(path);
     let stem = input
         .file_stem()
         .and_then(|value| value.to_str())
@@ -253,20 +306,13 @@ pub(crate) fn rewrite_chunk_path(
     }
 }
 
-pub(crate) fn default_chunk_basename(format: crate::audio::AudioFormat) -> String {
-    match format {
-        crate::audio::AudioFormat::Wav(_) => "audio.wav".to_owned(),
-        crate::audio::AudioFormat::OggOpus => "audio.opus".to_owned(),
-        crate::audio::AudioFormat::Mp3 => "audio.wav".to_owned(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::Path;
 
     use super::vad_bytes;
     use crate::analyze::{AnalysisOptions, DecisionOptions, RowDecisionMode};
+    use crate::audio::ChunkOutputFormat;
     use crate::parquet_io::{AudioColumns, binary_value, open_reader, string_value};
 
     #[test]
@@ -300,6 +346,7 @@ mod tests {
             0.0,
             Some(0.1),
             Some(30.0),
+            ChunkOutputFormat::Auto,
             Some(source_path),
         )
         .expect("run vad on embedded mp3 bytes");

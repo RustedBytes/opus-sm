@@ -6,7 +6,7 @@ use pyo3::types::PyBytes;
 
 use crate::analyze::{AnalysisOptions, DecisionOptions, RowDecisionMode};
 use crate::api;
-use crate::{AudioFormat, SegmentKind};
+use crate::{AudioFormat, ChunkOutputFormat, SegmentKind};
 
 #[pyclass(module = "opus_sm", get_all)]
 #[derive(Clone)]
@@ -342,6 +342,7 @@ fn strip_music_bytes_py<'py>(
         fade_ms=0.0,
         min_speech_seconds=None,
         max_speech_seconds=None,
+        chunk_format="auto",
         source_path=None
     )
 )]
@@ -358,6 +359,7 @@ fn vad_bytes_py(
     fade_ms: f32,
     min_speech_seconds: Option<f32>,
     max_speech_seconds: Option<f32>,
+    chunk_format: &str,
     source_path: Option<&str>,
 ) -> PyResult<Vec<VadChunk>> {
     let chunks = api::vad_chunks_bytes(
@@ -375,6 +377,7 @@ fn vad_bytes_py(
         fade_ms,
         min_speech_seconds,
         max_speech_seconds,
+        parse_chunk_format(chunk_format)?,
         source_path,
     )
     .map_err(to_py_err)?;
@@ -424,6 +427,9 @@ fn opus_sm(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("ROW_DECISION_MEAN", "mean")?;
     m.add("ROW_DECISION_MEDIAN", "median")?;
     m.add("ROW_DECISION_FRACTION", "fraction")?;
+    m.add("CHUNK_FORMAT_AUTO", "auto")?;
+    m.add("CHUNK_FORMAT_WAV", "wav")?;
+    m.add("CHUNK_FORMAT_OGG_OPUS", "ogg-opus")?;
     Ok(())
 }
 
@@ -498,6 +504,17 @@ fn parse_row_decision(value: &str) -> PyResult<RowDecisionMode> {
         "fraction" => Ok(RowDecisionMode::Fraction),
         _ => Err(PyValueError::new_err(
             "row_decision must be one of: max, mean, median, fraction",
+        )),
+    }
+}
+
+fn parse_chunk_format(value: &str) -> PyResult<ChunkOutputFormat> {
+    match value {
+        "auto" => Ok(ChunkOutputFormat::Auto),
+        "wav" => Ok(ChunkOutputFormat::Wav),
+        "ogg-opus" => Ok(ChunkOutputFormat::OggOpus),
+        _ => Err(PyValueError::new_err(
+            "chunk_format must be one of: auto, wav, ogg-opus",
         )),
     }
 }

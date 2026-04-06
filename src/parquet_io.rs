@@ -353,6 +353,47 @@ pub(crate) fn rebuild_batch_with_overrides(
     RecordBatch::try_new(batch.schema(), columns).context("build output batch")
 }
 
+pub(crate) fn rebuild_batch_from_indices_with_overrides(
+    batch: &RecordBatch,
+    audio: &AudioColumns<'_>,
+    source_indices: &[u32],
+    bytes_out: &[Option<Vec<u8>>],
+    path_out: &[Option<String>],
+    duration_out: Option<&[f64]>,
+    transcription_override: Option<&str>,
+) -> Result<RecordBatch> {
+    let schema = batch.schema();
+    let indices = UInt32Array::from(source_indices.to_vec());
+    let new_audio = rebuild_audio_struct_from_indices(
+        audio.audio_struct,
+        &indices,
+        build_binary_array(audio.bytes_type, bytes_out)?,
+        build_string_array(audio.path_type, path_out)?,
+    )?;
+
+    let mut columns = Vec::with_capacity(batch.num_columns());
+    for (column_index, field) in schema.fields().iter().enumerate() {
+        let column = if column_index == audio.audio_index {
+            Arc::new(new_audio.clone()) as ArrayRef
+        } else if let Some(duration_out) = duration_out
+            && field.name() == "duration"
+        {
+            build_duration_array(field.data_type(), duration_out)?
+        } else if let Some(transcription_override) = transcription_override
+            && field.name() == "transcription"
+        {
+            let values = vec![Some(transcription_override.to_owned()); source_indices.len()];
+            build_string_array(field.data_type(), &values)?
+        } else {
+            take(batch.column(column_index).as_ref(), &indices, None)
+                .with_context(|| format!("take column {}", field.name()))?
+        };
+        columns.push(column);
+    }
+
+    RecordBatch::try_new(schema, columns).context("build output batch")
+}
+
 fn print_probabilities(
     input_path: &Path,
     row: usize,
@@ -562,6 +603,39 @@ fn rebuild_audio_struct(
         columns,
         original.nulls().cloned(),
     ))
+}
+
+fn rebuild_audio_struct_from_indices(
+    original: &StructArray,
+    indices: &UInt32Array,
+    new_bytes: ArrayRef,
+    new_path: ArrayRef,
+) -> Result<StructArray> {
+    let mut columns = Vec::with_capacity(original.num_columns());
+    for field in original.fields() {
+        let column = match field.name().as_str() {
+            "bytes" => new_bytes.clone(),
+            "path" => new_path.clone(),
+            name => {
+                let source = original
+                    .column_by_name(name)
+                    .ok_or_else(|| anyhow!("missing audio field {}", name))?;
+                take(source.as_ref(), indices, None)
+                    .with_context(|| format!("take audio field {}", name))?
+            }
+        };
+        columns.push(column);
+    }
+
+    let nulls = match original.nulls() {
+        Some(_) => {
+            let taken = take(original, indices, None).context("take audio struct nulls")?;
+            taken.as_struct().nulls().cloned()
+        }
+        None => None,
+    };
+
+    Ok(StructArray::new(original.fields().clone(), columns, nulls))
 }
 
 fn build_binary_array(data_type: &DataType, values: &[Option<Vec<u8>>]) -> Result<ArrayRef> {
