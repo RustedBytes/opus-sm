@@ -158,36 +158,31 @@ pub fn speech_chunks(
             continue;
         }
 
-        let mut chunk_start = start_frame;
-        loop {
-            let chunk_end = match max_speech_frames {
-                Some(limit) => (chunk_start + limit).min(end_frame),
-                None => end_frame,
-            };
-            let chunk_len = chunk_end.saturating_sub(chunk_start);
-            if chunk_len >= min_speech_frames {
-                let start = chunk_start * audio.channels;
-                let end = chunk_end * audio.channels;
-                let segment = &audio.samples[start..end];
-                let boundary_left = chunk_start > 0;
-                let boundary_right = chunk_end < total_frames;
-                let mut chunk = Vec::with_capacity(segment.len());
-                append_with_fades(
-                    &mut chunk,
-                    segment,
-                    audio.channels,
-                    fade_frames,
-                    boundary_left,
-                    boundary_right,
-                );
-                chunks.push(chunk);
-            }
-
-            if chunk_end >= end_frame {
-                break;
-            }
-            chunk_start = chunk_end;
+        let chunk_len = end_frame.saturating_sub(start_frame);
+        if chunk_len < min_speech_frames {
+            continue;
         }
+        if let Some(limit) = max_speech_frames
+            && chunk_len > limit
+        {
+            continue;
+        }
+
+        let start = start_frame * audio.channels;
+        let end = end_frame * audio.channels;
+        let segment = &audio.samples[start..end];
+        let boundary_left = start_frame > 0;
+        let boundary_right = end_frame < total_frames;
+        let mut chunk = Vec::with_capacity(segment.len());
+        append_with_fades(
+            &mut chunk,
+            segment,
+            audio.channels,
+            fade_frames,
+            boundary_left,
+            boundary_right,
+        );
+        chunks.push(chunk);
     }
 
     Ok(chunks)

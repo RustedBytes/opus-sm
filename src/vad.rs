@@ -117,6 +117,16 @@ pub fn vad_bytes(
     let speech_segments = segments
         .into_iter()
         .filter(|segment| segment.kind == SegmentKind::Speech)
+        .filter(|segment| {
+            let duration = segment.end_seconds - segment.start_seconds;
+            let min_ok = options
+                .min_speech_seconds
+                .is_none_or(|min| duration >= min as f64);
+            let max_ok = options
+                .max_speech_seconds
+                .is_none_or(|max| duration <= max as f64);
+            min_ok && max_ok
+        })
         .collect::<Vec<_>>();
     let chunk_audio = speech_chunks(
         &decoded,
@@ -141,40 +151,23 @@ pub fn vad_bytes(
     let mut chunk_cursor = 0usize;
     let chunk_sample_rate = chunk_output_sample_rate(&decoded, options.chunk_format)?;
     for speech_segment in speech_segments {
-        let segment_duration = speech_segment.end_seconds - speech_segment.start_seconds;
-        let max_seconds = options.max_speech_seconds.map(|value| value as f64);
-        let pieces = match max_seconds {
-            Some(max) if max > 0.0 => (segment_duration / max).ceil().max(1.0) as usize,
-            _ => 1,
-        };
-        for piece in 0..pieces {
-            if chunk_cursor >= chunk_audio.len() {
-                break;
-            }
-            let start_seconds = match max_seconds {
-                Some(max) => speech_segment.start_seconds + piece as f64 * max,
-                None => speech_segment.start_seconds,
-            };
-            let end_seconds = match max_seconds {
-                Some(max) => (speech_segment.start_seconds + (piece + 1) as f64 * max)
-                    .min(speech_segment.end_seconds),
-                None => speech_segment.end_seconds,
-            };
-            let chunk = &chunk_audio[chunk_cursor];
-            let bytes = encode_audio_with_format(&decoded, chunk, options.chunk_format)?;
-            let duration_seconds =
-                chunk_output_duration_seconds(&decoded, chunk, options.chunk_format)?;
-            chunks.push(VadChunk {
-                index: chunk_cursor,
-                start_seconds,
-                end_seconds,
-                duration_seconds,
-                sampling_rate: chunk_sample_rate,
-                path: rewrite_chunk_path(&base_path, chunk_cursor),
-                bytes,
-            });
-            chunk_cursor += 1;
+        if chunk_cursor >= chunk_audio.len() {
+            break;
         }
+        let chunk = &chunk_audio[chunk_cursor];
+        let bytes = encode_audio_with_format(&decoded, chunk, options.chunk_format)?;
+        let duration_seconds =
+            chunk_output_duration_seconds(&decoded, chunk, options.chunk_format)?;
+        chunks.push(VadChunk {
+            index: chunk_cursor,
+            start_seconds: speech_segment.start_seconds,
+            end_seconds: speech_segment.end_seconds,
+            duration_seconds,
+            sampling_rate: chunk_sample_rate,
+            path: rewrite_chunk_path(&base_path, chunk_cursor),
+            bytes,
+        });
+        chunk_cursor += 1;
     }
 
     Ok(chunks)
