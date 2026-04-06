@@ -17,6 +17,7 @@ pub enum Commands {
     Segment(SegmentArgs),
     StripMusic(StripMusicArgs),
     SeparateSm(SeparateSmArgs),
+    Vad(VadArgs),
 }
 
 #[derive(Debug, Clone, Args)]
@@ -119,4 +120,28 @@ pub struct SeparateSmArgs {
 
     #[command(flatten)]
     pub decision: DecisionArgs,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct VadArgs {
+    #[command(flatten)]
+    pub input: InputArgs,
+
+    #[arg(long)]
+    pub output: PathBuf,
+
+    #[command(flatten)]
+    pub analysis: AnalysisArgs,
+
+    #[command(flatten)]
+    pub decision: DecisionArgs,
+
+    #[command(flatten)]
+    pub strip: StripArgs,
+
+    #[arg(long)]
+    pub min_speech_seconds: Option<f32>,
+
+    #[arg(long)]
+    pub max_speech_seconds: Option<f32>,
 }

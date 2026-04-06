@@ -103,6 +103,76 @@ pub fn strip_music(
     Ok(stripped)
 }
 
+pub fn speech_chunks(
+    audio: &DecodedAudio,
+    decision: DecisionOptions,
+    analysis: AnalysisOptions,
+    fade_ms: f32,
+    min_speech_seconds: Option<f32>,
+    max_speech_seconds: Option<f32>,
+) -> Result<Vec<Vec<f32>>> {
+    let probabilities = analyze_audio(audio, analysis)?;
+    let speech_ranges = speech_ranges(&probabilities, decision);
+    if speech_ranges.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let total_frames = audio.samples.len() / audio.channels;
+    let fade_frames = ((fade_ms.max(0.0) / 1_000.0) * audio.sample_rate as f32).round() as usize;
+    let min_speech_frames = min_speech_seconds
+        .map(|seconds| seconds.max(0.0))
+        .map(|seconds| (seconds * audio.sample_rate as f32).round() as usize)
+        .unwrap_or(0);
+    let max_speech_frames = max_speech_seconds
+        .map(|seconds| seconds.max(0.0))
+        .map(|seconds| (seconds * audio.sample_rate as f32).round() as usize)
+        .filter(|frames| *frames > 0);
+    let mut chunks = Vec::with_capacity(speech_ranges.len());
+
+    for (start_seconds, end_seconds) in speech_ranges {
+        let start_frame = (start_seconds * audio.sample_rate as f64).round() as usize;
+        let end_frame = (end_seconds * audio.sample_rate as f64).round() as usize;
+        let start_frame = start_frame.min(total_frames);
+        let end_frame = end_frame.min(total_frames);
+        if end_frame <= start_frame {
+            continue;
+        }
+
+        let mut chunk_start = start_frame;
+        loop {
+            let chunk_end = match max_speech_frames {
+                Some(limit) => (chunk_start + limit).min(end_frame),
+                None => end_frame,
+            };
+            let chunk_len = chunk_end.saturating_sub(chunk_start);
+            if chunk_len >= min_speech_frames {
+                let start = chunk_start * audio.channels;
+                let end = chunk_end * audio.channels;
+                let segment = &audio.samples[start..end];
+                let boundary_left = chunk_start > 0;
+                let boundary_right = chunk_end < total_frames;
+                let mut chunk = Vec::with_capacity(segment.len());
+                append_with_fades(
+                    &mut chunk,
+                    segment,
+                    audio.channels,
+                    fade_frames,
+                    boundary_left,
+                    boundary_right,
+                );
+                chunks.push(chunk);
+            }
+
+            if chunk_end >= end_frame {
+                break;
+            }
+            chunk_start = chunk_end;
+        }
+    }
+
+    Ok(chunks)
+}
+
 pub fn encode_audio(audio: &DecodedAudio, samples: &[f32]) -> Result<Vec<u8>> {
     match audio.format {
         AudioFormat::Wav(wav) => encode_wav(samples, wav.spec),

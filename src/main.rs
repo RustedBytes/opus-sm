@@ -13,5 +13,6 @@ fn main() -> Result<()> {
         Commands::Segment(args) => parquet_io::run_segment(&args),
         Commands::StripMusic(args) => parquet_io::run_strip_music(&args),
         Commands::SeparateSm(args) => parquet_io::run_separate_sm(&args),
+        Commands::Vad(args) => parquet_io::run_vad(&args),
     }
 }

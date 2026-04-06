@@ -14,4 +14,6 @@ pub use api::{
     AudioAnalysis, AudioSegmentation, analyze_bytes, analyze_decoded, classify_bytes, decode,
     music_score_bytes, segment_bytes, strip_music_bytes,
 };
-pub use audio::{AudioFormat, DecodedAudio, WavEncoding, decode_audio, encode_audio, strip_music};
+pub use audio::{
+    AudioFormat, DecodedAudio, WavEncoding, decode_audio, encode_audio, speech_chunks, strip_music,
+};

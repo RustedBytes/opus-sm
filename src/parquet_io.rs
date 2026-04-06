@@ -15,8 +15,8 @@ use parquet::arrow::arrow_writer::ArrowWriter;
 use rayon::prelude::*;
 
 use crate::analyze::{AnalysisOptions, DecisionOptions, SegmentKind, row_is_music, segment};
-use crate::audio::{analyze_audio, decode_audio, encode_audio, strip_music};
-use crate::cli::{AnalyzeArgs, DecisionArgs, SegmentArgs, SeparateSmArgs, StripMusicArgs};
+use crate::audio::{analyze_audio, decode_audio, encode_audio, speech_chunks, strip_music};
+use crate::cli::{AnalyzeArgs, DecisionArgs, SegmentArgs, SeparateSmArgs, StripMusicArgs, VadArgs};
 
 pub fn run_analyze(args: &AnalyzeArgs) -> Result<()> {
     let analysis = analysis_options(&args.analysis);
@@ -170,6 +170,57 @@ pub fn run_separate_sm(args: &SeparateSmArgs) -> Result<()> {
     Ok(())
 }
 
+pub fn run_vad(args: &VadArgs) -> Result<()> {
+    let analysis = analysis_options(&args.analysis);
+    let decision = decision_options(&args.decision)?;
+    validate_optional_seconds(args.min_speech_seconds, "min-speech-seconds")?;
+    validate_optional_seconds(args.max_speech_seconds, "max-speech-seconds")?;
+    if let (Some(min), Some(max)) = (args.min_speech_seconds, args.max_speech_seconds) {
+        if min > max {
+            bail!("min-speech-seconds must be <= max-speech-seconds");
+        }
+    }
+
+    for input_path in collect_parquet_files(&args.input.input)? {
+        let output_path = map_output_path(&args.input.input, &args.output, &input_path)?;
+        if let Some(parent) = output_path.parent() {
+            fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+        }
+
+        let mut reader = open_reader(&input_path, args.input.batch_size)?;
+        let schema = reader.schema().clone();
+        let output = File::create(&output_path)
+            .with_context(|| format!("create output file {}", output_path.display()))?;
+        let mut writer = ArrowWriter::try_new(output, schema, None)
+            .with_context(|| format!("open {}", output_path.display()))?;
+
+        for batch in &mut reader {
+            let batch =
+                batch.with_context(|| format!("read batch from {}", input_path.display()))?;
+            let chunked = vad_batch(
+                &batch,
+                analysis,
+                decision,
+                args.strip.fade_ms,
+                args.min_speech_seconds,
+                args.max_speech_seconds,
+            )
+            .with_context(|| format!("run vad in {}", input_path.display()))?;
+            if chunked.num_rows() > 0 {
+                writer
+                    .write(&chunked)
+                    .with_context(|| format!("write batch to {}", output_path.display()))?;
+            }
+        }
+
+        writer
+            .close()
+            .with_context(|| format!("close {}", output_path.display()))?;
+    }
+
+    Ok(())
+}
+
 fn strip_batch(
     batch: &RecordBatch,
     analysis: AnalysisOptions,
@@ -217,6 +268,51 @@ fn classify_batch(
         take_rows(batch, &speech_indices)?,
         take_rows(batch, &music_indices)?,
     ))
+}
+
+fn vad_batch(
+    batch: &RecordBatch,
+    analysis: AnalysisOptions,
+    decision: DecisionOptions,
+    fade_ms: f32,
+    min_speech_seconds: Option<f32>,
+    max_speech_seconds: Option<f32>,
+) -> Result<RecordBatch> {
+    let audio = AudioColumns::new(batch)?;
+    let chunked_rows = (0..batch.num_rows())
+        .into_par_iter()
+        .map(|row| {
+            process_vad_row(
+                &audio,
+                row,
+                analysis,
+                decision,
+                fade_ms,
+                min_speech_seconds,
+                max_speech_seconds,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let mut source_indices = Vec::new();
+    let mut bytes_out = Vec::new();
+    let mut path_out = Vec::new();
+
+    for (row_idx, outputs) in chunked_rows.into_iter().enumerate() {
+        for chunk in outputs? {
+            source_indices.push(row_idx as u32);
+            bytes_out.push(Some(chunk.bytes));
+            path_out.push(Some(chunk.path));
+        }
+    }
+
+    if source_indices.is_empty() {
+        return empty_like(batch);
+    }
+
+    let base = take_rows(batch, &source_indices)?;
+    let base_audio = AudioColumns::new(&base)?;
+    rebuild_batch(&base, &base_audio, &bytes_out, &path_out)
 }
 
 fn analyze_batch_rows(
@@ -268,6 +364,49 @@ fn process_strip_row(
         bytes: Some(encoded),
         path: original_path,
     })
+}
+
+fn process_vad_row(
+    audio: &AudioColumns<'_>,
+    row: usize,
+    analysis: AnalysisOptions,
+    decision: DecisionOptions,
+    fade_ms: f32,
+    min_speech_seconds: Option<f32>,
+    max_speech_seconds: Option<f32>,
+) -> Result<Vec<VadChunkOutput>> {
+    let Some(bytes) = binary_value(audio.bytes.as_ref(), row)? else {
+        return Ok(Vec::new());
+    };
+
+    let decoded = decode_audio(bytes).with_context(|| format!("decode audio row {row}"))?;
+    let chunks = speech_chunks(
+        &decoded,
+        decision,
+        analysis,
+        fade_ms,
+        min_speech_seconds,
+        max_speech_seconds,
+    )
+    .with_context(|| format!("extract speech chunks row {row}"))?;
+    if chunks.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let original_path = string_value(audio.path.as_ref(), row)?
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| default_chunk_basename(decoded.format));
+
+    chunks
+        .into_iter()
+        .enumerate()
+        .map(|(chunk_index, chunk)| {
+            let path = rewrite_chunk_path(&original_path, chunk_index);
+            let bytes = encode_audio(&decoded, &chunk)
+                .with_context(|| format!("encode vad chunk row {row} chunk {chunk_index}"))?;
+            Ok(VadChunkOutput { bytes, path })
+        })
+        .collect()
 }
 
 fn classify_row(
@@ -345,6 +484,12 @@ struct RowAnalysis {
 struct StripRowOutput {
     bytes: Option<Vec<u8>>,
     path: Option<String>,
+}
+
+#[derive(Debug)]
+struct VadChunkOutput {
+    bytes: Vec<u8>,
+    path: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -440,6 +585,15 @@ fn map_output_path(input_root: &Path, output_root: &Path, input_path: &Path) -> 
 fn validate_threshold(threshold: f32) -> Result<()> {
     if !(0.0..=1.0).contains(&threshold) {
         bail!("threshold must be between 0.0 and 1.0");
+    }
+    Ok(())
+}
+
+fn validate_optional_seconds(value: Option<f32>, name: &str) -> Result<()> {
+    if let Some(value) = value {
+        if value <= 0.0 {
+            bail!("{name} must be > 0");
+        }
     }
     Ok(())
 }
@@ -549,6 +703,50 @@ fn build_string_array(data_type: &DataType, values: &[Option<String>]) -> Result
         other => bail!("unsupported audio path type: {other:?}"),
     };
     Ok(array)
+}
+
+fn empty_like(batch: &RecordBatch) -> Result<RecordBatch> {
+    let empty_indices = UInt32Array::from(Vec::<u32>::new());
+    let columns = batch
+        .columns()
+        .iter()
+        .map(|column| take(column.as_ref(), &empty_indices, None).context("build empty batch"))
+        .collect::<Result<Vec<_>>>()?;
+    RecordBatch::try_new(batch.schema(), columns).context("build empty output batch")
+}
+
+fn rewrite_chunk_path(path: &str, chunk_index: usize) -> String {
+    let input = Path::new(path);
+    let stem = input
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("audio");
+    let ext = input
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("");
+    let file_name = if ext.is_empty() {
+        format!("{stem}_chunk{}", chunk_index + 1)
+    } else {
+        format!("{stem}_chunk{}.{}", chunk_index + 1, ext)
+    };
+
+    if let Some(parent) = input.parent() {
+        if parent.as_os_str().is_empty() {
+            file_name
+        } else {
+            parent.join(file_name).to_string_lossy().into_owned()
+        }
+    } else {
+        file_name
+    }
+}
+
+fn default_chunk_basename(format: crate::audio::AudioFormat) -> String {
+    match format {
+        crate::audio::AudioFormat::Wav(_) => "audio.wav".to_owned(),
+        crate::audio::AudioFormat::OggOpus => "audio.opus".to_owned(),
+    }
 }
 
 fn binary_value(array: &dyn Array, row: usize) -> Result<Option<&[u8]>> {
