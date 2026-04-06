@@ -247,6 +247,17 @@ pub fn default_chunk_output_path(
     Ok(file_name.to_owned())
 }
 
+pub fn chunk_output_sample_rate(
+    audio: &DecodedAudio,
+    output_format: ChunkOutputFormat,
+) -> Result<u32> {
+    Ok(match resolve_chunk_audio_format(audio, output_format)? {
+        AudioFormat::OggOpus => OPUS_SAMPLE_RATE,
+        AudioFormat::Wav(_) => audio.sample_rate,
+        AudioFormat::Mp3 => unreachable!("chunk output format does not resolve to MP3"),
+    })
+}
+
 fn decode_wav(bytes: &[u8]) -> Result<DecodedAudio> {
     let mut reader = WavReader::new(Cursor::new(bytes)).context("open wav payload")?;
     let spec = reader.spec();

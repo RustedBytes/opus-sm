@@ -6,12 +6,12 @@ use anyhow::{Context, Result, anyhow, bail};
 use arrow_array::builder::BooleanBufferBuilder;
 use arrow_array::cast::AsArray;
 use arrow_array::{
-    Array, ArrayRef, BinaryArray, BinaryViewArray, Float32Array, Float64Array, LargeBinaryArray,
-    LargeStringArray, RecordBatch, RecordBatchReader, StringArray, StringViewArray, StructArray,
-    UInt32Array,
+    Array, ArrayRef, BinaryArray, BinaryViewArray, Float32Array, Float64Array, Int32Array,
+    Int64Array, LargeBinaryArray, LargeStringArray, RecordBatch, RecordBatchReader, StringArray,
+    StringViewArray, StructArray, UInt32Array, UInt64Array, new_null_array,
 };
 use arrow_buffer::NullBuffer;
-use arrow_schema::DataType;
+use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use arrow_select::take::take;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::arrow_writer::ArrowWriter;
@@ -358,44 +358,60 @@ pub(crate) fn rebuild_batch_with_overrides(
 }
 
 pub(crate) fn rebuild_batch_from_indices_with_overrides(
+    output_schema: &SchemaRef,
     batch: &RecordBatch,
     audio: &AudioColumns<'_>,
     source_indices: &[u32],
     bytes_out: &[Option<Vec<u8>>],
+    sampling_rate_out: &[u32],
     path_out: &[Option<String>],
     duration_out: Option<&[f64]>,
     transcription_override: Option<&str>,
 ) -> Result<RecordBatch> {
-    let schema = batch.schema();
     let indices = UInt32Array::from(source_indices.to_vec());
-    let new_audio = rebuild_audio_struct_from_indices(
-        audio.audio_struct,
-        &indices,
-        build_binary_array(audio.bytes_type, bytes_out)?,
-        build_string_array(audio.path_type, path_out)?,
-    )?;
-
-    let mut columns = Vec::with_capacity(batch.num_columns());
-    for (column_index, field) in schema.fields().iter().enumerate() {
-        let column = if column_index == audio.audio_index {
-            Arc::new(new_audio.clone()) as ArrayRef
-        } else if let Some(duration_out) = duration_out
-            && field.name() == "duration"
-        {
-            build_duration_array(field.data_type(), duration_out)?
-        } else if let Some(transcription_override) = transcription_override
-            && field.name() == "transcription"
-        {
-            let values = vec![Some(transcription_override.to_owned()); source_indices.len()];
-            build_string_array(field.data_type(), &values)?
-        } else {
-            take(batch.column(column_index).as_ref(), &indices, None)
-                .with_context(|| format!("take column {}", field.name()))?
+    let mut columns = Vec::with_capacity(output_schema.fields().len());
+    for field in output_schema.fields() {
+        let column = match field.name().as_str() {
+            "audio" => Arc::new(rebuild_audio_struct_from_indices(
+                field,
+                audio.audio_struct,
+                &indices,
+                bytes_out,
+                sampling_rate_out,
+                path_out,
+                audio.bytes_type,
+                audio.path_type,
+            )?) as ArrayRef,
+            "duration" => build_duration_array(
+                field.data_type(),
+                duration_out.ok_or_else(|| anyhow!("missing duration values"))?,
+            )?,
+            "transcription" => {
+                let values = vec![
+                    Some(
+                        transcription_override
+                            .ok_or_else(|| anyhow!("missing transcription override"))?
+                            .to_owned(),
+                    );
+                    source_indices.len()
+                ];
+                build_string_array(field.data_type(), &values)?
+            }
+            name => match batch
+                .schema()
+                .fields()
+                .iter()
+                .position(|candidate| candidate.name() == name)
+            {
+                Some(column_index) => take(batch.column(column_index).as_ref(), &indices, None)
+                    .with_context(|| format!("take column {}", field.name()))?,
+                None => new_null_array(field.data_type(), source_indices.len()),
+            },
         };
         columns.push(column);
     }
 
-    RecordBatch::try_new(schema, columns).context("build output batch")
+    RecordBatch::try_new(output_schema.clone(), columns).context("build output batch")
 }
 
 fn print_probabilities(
@@ -615,30 +631,39 @@ fn rebuild_audio_struct(
 }
 
 fn rebuild_audio_struct_from_indices(
+    output_field: &Field,
     original: &StructArray,
     indices: &UInt32Array,
-    new_bytes: ArrayRef,
-    new_path: ArrayRef,
+    bytes_out: &[Option<Vec<u8>>],
+    sampling_rate_out: &[u32],
+    path_out: &[Option<String>],
+    bytes_type: &DataType,
+    path_type: &DataType,
 ) -> Result<StructArray> {
-    let mut columns = Vec::with_capacity(original.num_columns());
-    for field in original.fields() {
+    let audio_fields = match output_field.data_type() {
+        DataType::Struct(fields) => fields.clone(),
+        other => bail!("audio column must be a struct, got {other:?}"),
+    };
+    let new_bytes = build_binary_array(bytes_type, bytes_out)?;
+    let new_path = build_string_array(path_type, path_out)?;
+    let mut columns = Vec::with_capacity(audio_fields.len());
+    for field in &audio_fields {
         let column = match field.name().as_str() {
             "bytes" => new_bytes.clone(),
+            "sampling_rate" => build_sampling_rate_array(field.data_type(), sampling_rate_out)?,
             "path" => new_path.clone(),
-            name => {
-                let source = original
-                    .column_by_name(name)
-                    .ok_or_else(|| anyhow!("missing audio field {}", name))?;
-                take(source.as_ref(), indices, None)
-                    .with_context(|| format!("take audio field {}", name))?
-            }
+            name => match original.column_by_name(name) {
+                Some(source) => take(source.as_ref(), indices, None)
+                    .with_context(|| format!("take audio field {}", name))?,
+                None => new_null_array(field.data_type(), indices.len()),
+            },
         };
         columns.push(column);
     }
 
     let nulls = take_nulls(original.nulls(), indices);
 
-    Ok(StructArray::new(original.fields().clone(), columns, nulls))
+    Ok(StructArray::new(audio_fields, columns, nulls))
 }
 
 fn take_nulls(nulls: Option<&NullBuffer>, indices: &UInt32Array) -> Option<NullBuffer> {
@@ -691,6 +716,88 @@ fn build_duration_array(data_type: &DataType, values: &[f64]) -> Result<ArrayRef
         other => bail!("unsupported duration type: {other:?}"),
     };
     Ok(array)
+}
+
+fn build_sampling_rate_array(data_type: &DataType, values: &[u32]) -> Result<ArrayRef> {
+    let array: ArrayRef = match data_type {
+        DataType::Int32 => Arc::new(Int32Array::from_iter_values(
+            values.iter().copied().map(|value| value as i32),
+        )),
+        DataType::Int64 => Arc::new(Int64Array::from_iter_values(
+            values.iter().copied().map(|value| value as i64),
+        )),
+        DataType::UInt32 => Arc::new(UInt32Array::from_iter_values(values.iter().copied())),
+        DataType::UInt64 => Arc::new(UInt64Array::from_iter_values(
+            values.iter().copied().map(u64::from),
+        )),
+        other => bail!("unsupported sampling_rate type: {other:?}"),
+    };
+    Ok(array)
+}
+
+pub(crate) fn vad_output_schema(input_schema: &Schema) -> Result<SchemaRef> {
+    let mut fields = Vec::with_capacity(input_schema.fields().len() + 2);
+    let mut has_duration = false;
+    let mut has_transcription = false;
+
+    for field in input_schema.fields() {
+        if field.name() == "audio" {
+            fields.push(Arc::new(vad_audio_field(field)?));
+        } else {
+            if field.name() == "duration" {
+                has_duration = true;
+            } else if field.name() == "transcription" {
+                has_transcription = true;
+            }
+            fields.push(field.clone());
+        }
+    }
+
+    if !has_duration {
+        fields.push(Arc::new(Field::new("duration", DataType::Float64, true)));
+    }
+    if !has_transcription {
+        fields.push(Arc::new(Field::new("transcription", DataType::Utf8, true)));
+    }
+
+    Ok(Arc::new(Schema::new(fields)))
+}
+
+fn vad_audio_field(field: &Field) -> Result<Field> {
+    let audio_fields = match field.data_type() {
+        DataType::Struct(fields) => fields.clone(),
+        other => bail!("audio column must be a struct, got {other:?}"),
+    };
+
+    let mut fields = Vec::with_capacity(audio_fields.len() + 1);
+    let mut inserted_sampling_rate = false;
+    for child in &audio_fields {
+        fields.push(child.clone());
+        if child.name() == "bytes"
+            && !audio_fields.iter().any(|field| field.name() == "sampling_rate")
+        {
+            fields.push(Arc::new(Field::new(
+                "sampling_rate",
+                DataType::Int32,
+                true,
+            )));
+            inserted_sampling_rate = true;
+        }
+    }
+    if !audio_fields.iter().any(|field| field.name() == "sampling_rate") && !inserted_sampling_rate
+    {
+        fields.push(Arc::new(Field::new(
+            "sampling_rate",
+            DataType::Int32,
+            true,
+        )));
+    }
+
+    Ok(Field::new(
+        field.name(),
+        DataType::Struct(fields.into()),
+        field.is_nullable(),
+    ))
 }
 
 pub(crate) fn empty_like(batch: &RecordBatch) -> Result<RecordBatch> {

@@ -8,14 +8,14 @@ use rayon::prelude::*;
 
 use crate::analyze::{AnalysisOptions, DecisionOptions, SegmentKind, segment};
 use crate::audio::{
-    ChunkOutputFormat, analyze_audio, decode_audio, default_chunk_output_path,
+    ChunkOutputFormat, analyze_audio, chunk_output_sample_rate, decode_audio, default_chunk_output_path,
     encode_audio_with_format, rewrite_chunk_output_path, speech_chunks,
 };
 use crate::cli::VadArgs;
 use crate::parquet_io::{
     AudioColumns, analysis_options, binary_value, collect_parquet_files, decision_options,
     empty_like, map_output_path, open_reader, rebuild_batch_from_indices_with_overrides,
-    string_value, validate_optional_seconds,
+    string_value, vad_output_schema, validate_optional_seconds,
 };
 
 const MAX_BINARY_PAYLOAD_PER_BATCH: usize = 1_500_000_000;
@@ -27,6 +27,7 @@ pub struct VadChunk {
     pub start_seconds: f64,
     pub end_seconds: f64,
     pub duration_seconds: f64,
+    pub sampling_rate: u32,
     pub path: String,
     pub bytes: Vec<u8>,
 }
@@ -58,7 +59,7 @@ pub fn run_vad(args: &VadArgs) -> Result<()> {
         }
 
         let mut reader = open_reader(&input_path, args.input.batch_size)?;
-        let schema = reader.schema().clone();
+        let schema = vad_output_schema(reader.schema().as_ref())?;
         let output = File::create(&output_path)
             .with_context(|| format!("create output file {}", output_path.display()))?;
         let mut writer = ArrowWriter::try_new(output, schema, None)
@@ -137,6 +138,7 @@ pub fn vad_bytes(
 
     let mut chunks = Vec::new();
     let mut chunk_cursor = 0usize;
+    let chunk_sample_rate = chunk_output_sample_rate(&decoded, options.chunk_format)?;
     for speech_segment in speech_segments {
         let segment_duration = speech_segment.end_seconds - speech_segment.start_seconds;
         let max_seconds = options.max_speech_seconds.map(|value| value as f64);
@@ -164,6 +166,7 @@ pub fn vad_bytes(
                 start_seconds,
                 end_seconds,
                 duration_seconds: end_seconds - start_seconds,
+                sampling_rate: chunk_sample_rate,
                 path: rewrite_chunk_path(&base_path, chunk_cursor),
                 bytes,
             });
@@ -184,6 +187,7 @@ fn vad_batches(
     chunk_format: ChunkOutputFormat,
 ) -> Result<Vec<RecordBatch>> {
     let audio = AudioColumns::new(batch)?;
+    let schema = vad_output_schema(batch.schema().as_ref())?;
     let chunked_rows = (0..batch.num_rows())
         .into_par_iter()
         .map(|row| {
@@ -205,6 +209,7 @@ fn vad_batches(
 
     let mut source_indices = Vec::new();
     let mut bytes_out = Vec::new();
+    let mut sampling_rate_out = Vec::new();
     let mut path_out = Vec::new();
     let mut duration_out = Vec::new();
     let mut batches = Vec::new();
@@ -220,16 +225,19 @@ fn vad_batches(
                     || string_bytes.saturating_add(chunk_string) > MAX_STRING_PAYLOAD_PER_BATCH);
             if should_flush {
                 batches.push(rebuild_batch_from_indices_with_overrides(
+                    &schema,
                     batch,
                     &audio,
                     &source_indices,
                     &bytes_out,
+                    &sampling_rate_out,
                     &path_out,
                     Some(&duration_out),
                     Some("-"),
                 )?);
                 source_indices.clear();
                 bytes_out.clear();
+                sampling_rate_out.clear();
                 path_out.clear();
                 duration_out.clear();
                 binary_bytes = 0;
@@ -237,6 +245,7 @@ fn vad_batches(
             }
             source_indices.push(row_idx as u32);
             bytes_out.push(Some(chunk.bytes));
+            sampling_rate_out.push(chunk.sampling_rate);
             path_out.push(Some(chunk.path));
             duration_out.push(chunk.duration_seconds);
             binary_bytes += chunk_binary;
@@ -252,10 +261,12 @@ fn vad_batches(
     }
 
     batches.push(rebuild_batch_from_indices_with_overrides(
+        &schema,
         batch,
         &audio,
         &source_indices,
         &bytes_out,
+        &sampling_rate_out,
         &path_out,
         Some(&duration_out),
         Some("-"),

@@ -119,6 +119,7 @@ struct VadChunk {
     start_seconds: f64,
     end_seconds: f64,
     duration_seconds: f64,
+    sampling_rate: u32,
     path: String,
 }
 
@@ -126,8 +127,8 @@ struct VadChunk {
 impl VadChunk {
     fn __repr__(&self) -> String {
         format!(
-            "VadChunk(index={}, start_seconds={:?}, end_seconds={:?}, duration_seconds={:?}, path={:?})",
-            self.index, self.start_seconds, self.end_seconds, self.duration_seconds, self.path
+            "VadChunk(index={}, start_seconds={:?}, end_seconds={:?}, duration_seconds={:?}, sampling_rate={}, path={:?})",
+            self.index, self.start_seconds, self.end_seconds, self.duration_seconds, self.sampling_rate, self.path
         )
     }
 }
@@ -391,6 +392,7 @@ fn vad_bytes_py(
             start_seconds: chunk.start_seconds,
             end_seconds: chunk.end_seconds,
             duration_seconds: chunk.duration_seconds,
+            sampling_rate: chunk.sampling_rate,
             path: chunk.path,
         })
         .collect())
