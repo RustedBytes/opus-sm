@@ -3,9 +3,9 @@ pub mod api;
 pub mod audio;
 pub mod cli;
 pub mod parquet_io;
-pub mod vad;
 #[cfg(feature = "python")]
 pub mod python;
+pub mod vad;
 
 pub use analyze::{
     AnalysisOptions, DecisionOptions, FrameProbability, RowDecisionMode, Segment, SegmentKind,
@@ -19,4 +19,4 @@ pub use audio::{
     AudioFormat, ChunkOutputFormat, DecodedAudio, WavEncoding, decode_audio, encode_audio,
     speech_chunks, strip_music,
 };
-pub use vad::{VadChunk, vad_bytes};
+pub use vad::{VadChunk, VadOptions, vad_bytes};

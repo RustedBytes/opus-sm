@@ -59,9 +59,7 @@ pub fn decode_audio(bytes: &[u8]) -> Result<DecodedAudio> {
     } else if bytes.starts_with(b"ID3") || is_mpeg_audio_frame(bytes) {
         decode_mp3(bytes)
     } else {
-        bail!(
-            "unsupported embedded audio format (expected RIFF/WAV, OggS/Opus, or MP3/ID3)"
-        );
+        bail!("unsupported embedded audio format (expected RIFF/WAV, OggS/Opus, or MP3/ID3)");
     }
 }
 
@@ -199,7 +197,10 @@ pub fn encode_audio(audio: &DecodedAudio, samples: &[f32]) -> Result<Vec<u8>> {
     match audio.format {
         AudioFormat::Wav(wav) => encode_wav(samples, wav.spec),
         AudioFormat::OggOpus => encode_ogg_opus(samples, audio.channels),
-        AudioFormat::Mp3 => encode_wav(samples, default_wav_spec(audio.sample_rate, audio.channels)?),
+        AudioFormat::Mp3 => encode_wav(
+            samples,
+            default_wav_spec(audio.sample_rate, audio.channels)?,
+        ),
     }
 }
 

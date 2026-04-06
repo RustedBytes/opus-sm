@@ -6,7 +6,7 @@ use pyo3::types::PyBytes;
 
 use crate::analyze::{AnalysisOptions, DecisionOptions, RowDecisionMode};
 use crate::api;
-use crate::{AudioFormat, ChunkOutputFormat, SegmentKind};
+use crate::{AudioFormat, ChunkOutputFormat, SegmentKind, VadOptions};
 
 #[pyclass(module = "opus_sm", get_all)]
 #[derive(Clone)]
@@ -374,11 +374,13 @@ fn vad_bytes_py(
             row_decision,
             row_fraction,
         )?,
-        fade_ms,
-        min_speech_seconds,
-        max_speech_seconds,
-        parse_chunk_format(chunk_format)?,
-        source_path,
+        VadOptions {
+            fade_ms,
+            min_speech_seconds,
+            max_speech_seconds,
+            chunk_format: parse_chunk_format(chunk_format)?,
+            source_path,
+        },
     )
     .map_err(to_py_err)?;
 

@@ -31,6 +31,15 @@ pub struct VadChunk {
     pub bytes: Vec<u8>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct VadOptions<'a> {
+    pub fade_ms: f32,
+    pub min_speech_seconds: Option<f32>,
+    pub max_speech_seconds: Option<f32>,
+    pub chunk_format: ChunkOutputFormat,
+    pub source_path: Option<&'a str>,
+}
+
 pub fn run_vad(args: &VadArgs) -> Result<()> {
     let analysis = analysis_options(&args.analysis);
     let decision = decision_options(&args.decision)?;
@@ -90,15 +99,11 @@ pub fn vad_bytes(
     bytes: &[u8],
     analysis: AnalysisOptions,
     decision: DecisionOptions,
-    fade_ms: f32,
-    min_speech_seconds: Option<f32>,
-    max_speech_seconds: Option<f32>,
-    chunk_format: ChunkOutputFormat,
-    source_path: Option<&str>,
+    options: VadOptions<'_>,
 ) -> Result<Vec<VadChunk>> {
-    validate_optional_seconds(min_speech_seconds, "min-speech-seconds")?;
-    validate_optional_seconds(max_speech_seconds, "max-speech-seconds")?;
-    if let (Some(min), Some(max)) = (min_speech_seconds, max_speech_seconds)
+    validate_optional_seconds(options.min_speech_seconds, "min-speech-seconds")?;
+    validate_optional_seconds(options.max_speech_seconds, "max-speech-seconds")?;
+    if let (Some(min), Some(max)) = (options.min_speech_seconds, options.max_speech_seconds)
         && min > max
     {
         bail!("min-speech-seconds must be <= max-speech-seconds");
@@ -115,25 +120,26 @@ pub fn vad_bytes(
         &decoded,
         decision,
         analysis,
-        fade_ms,
-        min_speech_seconds,
-        max_speech_seconds,
+        options.fade_ms,
+        options.min_speech_seconds,
+        options.max_speech_seconds,
     )?;
     if chunk_audio.is_empty() {
         return Ok(Vec::new());
     }
 
-    let base_path = source_path
+    let base_path = options
+        .source_path
         .map(ToOwned::to_owned)
-        .map(|path| rewrite_chunk_output_path(&path, &decoded, chunk_format))
+        .map(|path| rewrite_chunk_output_path(&path, &decoded, options.chunk_format))
         .transpose()?
-        .unwrap_or(default_chunk_output_path(&decoded, chunk_format)?);
+        .unwrap_or(default_chunk_output_path(&decoded, options.chunk_format)?);
 
     let mut chunks = Vec::new();
     let mut chunk_cursor = 0usize;
     for speech_segment in speech_segments {
         let segment_duration = speech_segment.end_seconds - speech_segment.start_seconds;
-        let max_seconds = max_speech_seconds.map(|value| value as f64);
+        let max_seconds = options.max_speech_seconds.map(|value| value as f64);
         let pieces = match max_seconds {
             Some(max) if max > 0.0 => (segment_duration / max).ceil().max(1.0) as usize,
             _ => 1,
@@ -152,7 +158,7 @@ pub fn vad_bytes(
                 None => speech_segment.end_seconds,
             };
             let chunk = &chunk_audio[chunk_cursor];
-            let bytes = encode_audio_with_format(&decoded, chunk, chunk_format)?;
+            let bytes = encode_audio_with_format(&decoded, chunk, options.chunk_format)?;
             chunks.push(VadChunk {
                 index: chunk_cursor,
                 start_seconds,
@@ -186,10 +192,13 @@ fn vad_batches(
                 row,
                 analysis,
                 decision,
-                fade_ms,
-                min_speech_seconds,
-                max_speech_seconds,
-                chunk_format,
+                VadOptions {
+                    fade_ms,
+                    min_speech_seconds,
+                    max_speech_seconds,
+                    chunk_format,
+                    source_path: None,
+                },
             )
         })
         .collect::<Vec<_>>();
@@ -255,31 +264,18 @@ fn vad_batches(
     Ok(batches)
 }
 
-fn process_vad_row(
-    audio: &AudioColumns<'_>,
+fn process_vad_row<'a>(
+    audio: &AudioColumns<'a>,
     row: usize,
     analysis: AnalysisOptions,
     decision: DecisionOptions,
-    fade_ms: f32,
-    min_speech_seconds: Option<f32>,
-    max_speech_seconds: Option<f32>,
-    chunk_format: ChunkOutputFormat,
+    mut options: VadOptions<'a>,
 ) -> Result<Vec<VadChunk>> {
     let Some(bytes) = binary_value(audio.bytes.as_ref(), row)? else {
         return Ok(Vec::new());
     };
-    let source_path = string_value(audio.path.as_ref(), row)?;
-    vad_bytes(
-        bytes,
-        analysis,
-        decision,
-        fade_ms,
-        min_speech_seconds,
-        max_speech_seconds,
-        chunk_format,
-        source_path,
-    )
-    .with_context(|| format!("extract speech chunks row {row}"))
+    options.source_path = string_value(audio.path.as_ref(), row)?;
+    vad_bytes(bytes, analysis, decision, options).with_context(|| format!("extract speech chunks row {row}"))
 }
 
 pub(crate) fn rewrite_chunk_path(path: &str, chunk_index: usize) -> String {
@@ -288,7 +284,10 @@ pub(crate) fn rewrite_chunk_path(path: &str, chunk_index: usize) -> String {
         .file_stem()
         .and_then(|value| value.to_str())
         .unwrap_or("audio");
-    let ext = input.extension().and_then(|value| value.to_str()).unwrap_or("");
+    let ext = input
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("");
     let file_name = if ext.is_empty() {
         format!("{stem}_chunk{}", chunk_index + 1)
     } else {
@@ -310,7 +309,7 @@ pub(crate) fn rewrite_chunk_path(path: &str, chunk_index: usize) -> String {
 mod tests {
     use std::path::Path;
 
-    use super::vad_bytes;
+    use super::{VadOptions, vad_bytes};
     use crate::analyze::{AnalysisOptions, DecisionOptions, RowDecisionMode};
     use crate::audio::ChunkOutputFormat;
     use crate::parquet_io::{AudioColumns, binary_value, open_reader, string_value};
@@ -343,11 +342,13 @@ mod tests {
                 row_decision: RowDecisionMode::Max,
                 row_fraction: 0.5,
             },
-            0.0,
-            Some(0.1),
-            Some(30.0),
-            ChunkOutputFormat::Auto,
-            Some(source_path),
+            VadOptions {
+                fade_ms: 0.0,
+                min_speech_seconds: Some(0.1),
+                max_speech_seconds: Some(30.0),
+                chunk_format: ChunkOutputFormat::Auto,
+                source_path: Some(source_path),
+            },
         )
         .expect("run vad on embedded mp3 bytes");
 

@@ -18,7 +18,9 @@ use parquet::arrow::arrow_writer::ArrowWriter;
 use rayon::prelude::*;
 
 use crate::analyze::{AnalysisOptions, DecisionOptions, SegmentKind, row_is_music, segment};
-use crate::audio::{analyze_audio, decode_audio, encode_audio, rewrite_encoded_audio_path, strip_music};
+use crate::audio::{
+    analyze_audio, decode_audio, encode_audio, rewrite_encoded_audio_path, strip_music,
+};
 use crate::cli::{AnalyzeArgs, DecisionArgs, SegmentArgs, SeparateSmArgs, StripMusicArgs};
 
 pub fn run_analyze(args: &AnalyzeArgs) -> Result<()> {
@@ -335,10 +337,10 @@ pub(crate) fn rebuild_batch_with_overrides(
             .fields()
             .iter()
             .position(|field| field.name() == "duration")
-        {
-            let data_type = schema.field(duration_index).data_type();
-            columns[duration_index] = build_duration_array(data_type, duration_out)?;
-        }
+    {
+        let data_type = schema.field(duration_index).data_type();
+        columns[duration_index] = build_duration_array(data_type, duration_out)?;
+    }
 
     if let Some(transcription_override) = transcription_override
         && let Some(transcription_index) = batch
@@ -346,11 +348,11 @@ pub(crate) fn rebuild_batch_with_overrides(
             .fields()
             .iter()
             .position(|field| field.name() == "transcription")
-        {
-            let data_type = schema.field(transcription_index).data_type();
-            let values = vec![Some(transcription_override.to_owned()); batch.num_rows()];
-            columns[transcription_index] = build_string_array(data_type, &values)?;
-        }
+    {
+        let data_type = schema.field(transcription_index).data_type();
+        let values = vec![Some(transcription_override.to_owned()); batch.num_rows()];
+        columns[transcription_index] = build_string_array(data_type, &values)?;
+    }
 
     RecordBatch::try_new(batch.schema(), columns).context("build output batch")
 }
@@ -503,7 +505,11 @@ fn collect_parquet_files_recursive(root: &Path, files: &mut Vec<PathBuf>) -> Res
     Ok(())
 }
 
-pub(crate) fn map_output_path(input_root: &Path, output_root: &Path, input_path: &Path) -> Result<PathBuf> {
+pub(crate) fn map_output_path(
+    input_root: &Path,
+    output_root: &Path,
+    input_path: &Path,
+) -> Result<PathBuf> {
     if input_root.is_file() {
         return Ok(output_root.to_path_buf());
     }
@@ -526,9 +532,10 @@ fn validate_threshold(threshold: f32) -> Result<()> {
 
 pub(crate) fn validate_optional_seconds(value: Option<f32>, name: &str) -> Result<()> {
     if let Some(value) = value
-        && value <= 0.0 {
-            bail!("{name} must be > 0");
-        }
+        && value <= 0.0
+    {
+        bail!("{name} must be > 0");
+    }
     Ok(())
 }
 
