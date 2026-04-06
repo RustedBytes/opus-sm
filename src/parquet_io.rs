@@ -5,8 +5,9 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow, bail};
 use arrow_array::cast::AsArray;
 use arrow_array::{
-    Array, ArrayRef, BinaryArray, BinaryViewArray, LargeBinaryArray, LargeStringArray, RecordBatch,
-    RecordBatchReader, StringArray, StringViewArray, StructArray, UInt32Array,
+    Array, ArrayRef, BinaryArray, BinaryViewArray, Float32Array, Float64Array, LargeBinaryArray,
+    LargeStringArray, RecordBatch, RecordBatchReader, StringArray, StringViewArray, StructArray,
+    UInt32Array,
 };
 use arrow_schema::DataType;
 use arrow_select::take::take;
@@ -175,11 +176,10 @@ pub fn run_vad(args: &VadArgs) -> Result<()> {
     let decision = decision_options(&args.decision)?;
     validate_optional_seconds(args.min_speech_seconds, "min-speech-seconds")?;
     validate_optional_seconds(args.max_speech_seconds, "max-speech-seconds")?;
-    if let (Some(min), Some(max)) = (args.min_speech_seconds, args.max_speech_seconds) {
-        if min > max {
+    if let (Some(min), Some(max)) = (args.min_speech_seconds, args.max_speech_seconds)
+        && min > max {
             bail!("min-speech-seconds must be <= max-speech-seconds");
         }
-    }
 
     for input_path in collect_parquet_files(&args.input.input)? {
         let output_path = map_output_path(&args.input.input, &args.output, &input_path)?;
@@ -297,12 +297,14 @@ fn vad_batch(
     let mut source_indices = Vec::new();
     let mut bytes_out = Vec::new();
     let mut path_out = Vec::new();
+    let mut duration_out = Vec::new();
 
     for (row_idx, outputs) in chunked_rows.into_iter().enumerate() {
         for chunk in outputs? {
             source_indices.push(row_idx as u32);
             bytes_out.push(Some(chunk.bytes));
             path_out.push(Some(chunk.path));
+            duration_out.push(chunk.duration_seconds);
         }
     }
 
@@ -312,7 +314,14 @@ fn vad_batch(
 
     let base = take_rows(batch, &source_indices)?;
     let base_audio = AudioColumns::new(&base)?;
-    rebuild_batch(&base, &base_audio, &bytes_out, &path_out)
+    rebuild_batch_with_overrides(
+        &base,
+        &base_audio,
+        &bytes_out,
+        &path_out,
+        Some(&duration_out),
+        Some("-"),
+    )
 }
 
 fn analyze_batch_rows(
@@ -402,9 +411,15 @@ fn process_vad_row(
         .enumerate()
         .map(|(chunk_index, chunk)| {
             let path = rewrite_chunk_path(&original_path, chunk_index);
+            let duration_seconds =
+                chunk.len() as f64 / (decoded.channels as f64 * decoded.sample_rate as f64);
             let bytes = encode_audio(&decoded, &chunk)
                 .with_context(|| format!("encode vad chunk row {row} chunk {chunk_index}"))?;
-            Ok(VadChunkOutput { bytes, path })
+            Ok(VadChunkOutput {
+                bytes,
+                path,
+                duration_seconds,
+            })
         })
         .collect()
 }
@@ -445,6 +460,18 @@ fn rebuild_batch(
     bytes_out: &[Option<Vec<u8>>],
     path_out: &[Option<String>],
 ) -> Result<RecordBatch> {
+    rebuild_batch_with_overrides(batch, audio, bytes_out, path_out, None, None)
+}
+
+fn rebuild_batch_with_overrides(
+    batch: &RecordBatch,
+    audio: &AudioColumns<'_>,
+    bytes_out: &[Option<Vec<u8>>],
+    path_out: &[Option<String>],
+    duration_out: Option<&[f64]>,
+    transcription_override: Option<&str>,
+) -> Result<RecordBatch> {
+    let schema = batch.schema();
     let new_audio = rebuild_audio_struct(
         audio.audio_struct,
         build_binary_array(audio.bytes_type, bytes_out)?,
@@ -452,6 +479,30 @@ fn rebuild_batch(
     )?;
     let mut columns = batch.columns().to_vec();
     columns[audio.audio_index] = Arc::new(new_audio);
+
+    if let Some(duration_out) = duration_out
+        && let Some(duration_index) = batch
+            .schema()
+            .fields()
+            .iter()
+            .position(|field| field.name() == "duration")
+        {
+            let data_type = schema.field(duration_index).data_type();
+            columns[duration_index] = build_duration_array(data_type, duration_out)?;
+        }
+
+    if let Some(transcription_override) = transcription_override
+        && let Some(transcription_index) = batch
+            .schema()
+            .fields()
+            .iter()
+            .position(|field| field.name() == "transcription")
+        {
+            let data_type = schema.field(transcription_index).data_type();
+            let values = vec![Some(transcription_override.to_owned()); batch.num_rows()];
+            columns[transcription_index] = build_string_array(data_type, &values)?;
+        }
+
     RecordBatch::try_new(batch.schema(), columns).context("build output batch")
 }
 
@@ -490,6 +541,7 @@ struct StripRowOutput {
 struct VadChunkOutput {
     bytes: Vec<u8>,
     path: String,
+    duration_seconds: f64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -590,11 +642,10 @@ fn validate_threshold(threshold: f32) -> Result<()> {
 }
 
 fn validate_optional_seconds(value: Option<f32>, name: &str) -> Result<()> {
-    if let Some(value) = value {
-        if value <= 0.0 {
+    if let Some(value) = value
+        && value <= 0.0 {
             bail!("{name} must be > 0");
         }
-    }
     Ok(())
 }
 
@@ -701,6 +752,17 @@ fn build_string_array(data_type: &DataType, values: &[Option<String>]) -> Result
             values.iter().map(|value| value.as_deref()),
         )),
         other => bail!("unsupported audio path type: {other:?}"),
+    };
+    Ok(array)
+}
+
+fn build_duration_array(data_type: &DataType, values: &[f64]) -> Result<ArrayRef> {
+    let array: ArrayRef = match data_type {
+        DataType::Float32 => Arc::new(Float32Array::from_iter_values(
+            values.iter().copied().map(|value| value as f32),
+        )),
+        DataType::Float64 => Arc::new(Float64Array::from_iter_values(values.iter().copied())),
+        other => bail!("unsupported duration type: {other:?}"),
     };
     Ok(array)
 }
