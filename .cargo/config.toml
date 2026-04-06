@@ -1,0 +1,5 @@
+[build]
+rustflags = ["-Ctarget-cpu=x86-64"]
+
+[registries.crates-io]
+protocol = "sparse"
