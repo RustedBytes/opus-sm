@@ -4,6 +4,7 @@ use crate::analyze::{
     AnalysisOptions, DecisionOptions, FrameProbability, Segment, music_score, row_is_music, segment,
 };
 use crate::audio::{DecodedAudio, analyze_audio, decode_audio, encode_audio, strip_music};
+use crate::vad::{VadChunk, vad_bytes};
 
 #[derive(Debug, Clone)]
 pub struct AudioAnalysis {
@@ -74,4 +75,24 @@ pub fn strip_music_bytes(
     let decoded = decode_audio(bytes)?;
     let stripped = strip_music(&decoded, decision_options, analysis_options, fade_ms)?;
     encode_audio(&decoded, &stripped)
+}
+
+pub fn vad_chunks_bytes(
+    bytes: &[u8],
+    analysis_options: AnalysisOptions,
+    decision_options: DecisionOptions,
+    fade_ms: f32,
+    min_speech_seconds: Option<f32>,
+    max_speech_seconds: Option<f32>,
+    source_path: Option<&str>,
+) -> Result<Vec<VadChunk>> {
+    vad_bytes(
+        bytes,
+        analysis_options,
+        decision_options,
+        fade_ms,
+        min_speech_seconds,
+        max_speech_seconds,
+        source_path,
+    )
 }

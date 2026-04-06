@@ -37,6 +37,12 @@ def main() -> None:
         default=Path("speech_only.out"),
         help="Path for stripped output bytes",
     )
+    parser.add_argument(
+        "--chunk-dir",
+        type=Path,
+        default=Path("vad_chunks"),
+        help="Directory for VAD speech chunk outputs",
+    )
     args = parser.parse_args()
 
     audio_bytes = args.audio.read_bytes()
@@ -94,6 +100,27 @@ def main() -> None:
     )
     args.output.write_bytes(bytes(stripped))
     print(f"wrote stripped output to {args.output}")
+    print()
+
+    args.chunk_dir.mkdir(parents=True, exist_ok=True)
+    chunks = opus_sm.vad_bytes(
+        audio_bytes,
+        threshold=args.threshold,
+        smooth_window=args.smooth_window,
+        low_threshold=max(0.0, args.threshold - 0.15),
+        high_threshold=min(1.0, args.threshold + 0.05),
+        min_speech_frames=3,
+        min_speech_seconds=0.5,
+        max_speech_seconds=10.0,
+        fade_ms=args.fade_ms,
+        source_path=args.audio.name,
+    )
+    print(f"vad chunk count: {len(chunks)}")
+    for chunk in chunks:
+        print(chunk)
+        output_path = args.chunk_dir / chunk.path
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        print(f"chunk metadata ready for {output_path}")
 
 
 if __name__ == "__main__":

@@ -112,6 +112,26 @@ impl SegmentationResult {
     }
 }
 
+#[pyclass(module = "opus_sm", get_all)]
+#[derive(Clone)]
+struct VadChunk {
+    index: usize,
+    start_seconds: f64,
+    end_seconds: f64,
+    duration_seconds: f64,
+    path: String,
+}
+
+#[pymethods]
+impl VadChunk {
+    fn __repr__(&self) -> String {
+        format!(
+            "VadChunk(index={}, start_seconds={:?}, end_seconds={:?}, duration_seconds={:?}, path={:?})",
+            self.index, self.start_seconds, self.end_seconds, self.duration_seconds, self.path
+        )
+    }
+}
+
 #[pyfunction(name = "analyze_bytes", signature = (audio_bytes, smooth_window=1))]
 fn analyze_bytes_py(audio_bytes: &[u8], smooth_window: usize) -> PyResult<AnalysisResult> {
     let analysis =
@@ -307,6 +327,70 @@ fn strip_music_bytes_py<'py>(
     Ok(PyBytes::new(py, &bytes))
 }
 
+#[pyfunction(
+    name = "vad_bytes",
+    signature = (
+        audio_bytes,
+        threshold,
+        smooth_window=1,
+        high_threshold=None,
+        low_threshold=None,
+        min_music_frames=0,
+        min_speech_frames=0,
+        row_decision="max",
+        row_fraction=0.5,
+        fade_ms=0.0,
+        min_speech_seconds=None,
+        max_speech_seconds=None,
+        source_path=None
+    )
+)]
+fn vad_bytes_py(
+    audio_bytes: &[u8],
+    threshold: f32,
+    smooth_window: usize,
+    high_threshold: Option<f32>,
+    low_threshold: Option<f32>,
+    min_music_frames: usize,
+    min_speech_frames: usize,
+    row_decision: &str,
+    row_fraction: f32,
+    fade_ms: f32,
+    min_speech_seconds: Option<f32>,
+    max_speech_seconds: Option<f32>,
+    source_path: Option<&str>,
+) -> PyResult<Vec<VadChunk>> {
+    let chunks = api::vad_chunks_bytes(
+        audio_bytes,
+        AnalysisOptions { smooth_window },
+        decision_options(
+            threshold,
+            high_threshold,
+            low_threshold,
+            min_music_frames,
+            min_speech_frames,
+            row_decision,
+            row_fraction,
+        )?,
+        fade_ms,
+        min_speech_seconds,
+        max_speech_seconds,
+        source_path,
+    )
+    .map_err(to_py_err)?;
+
+    Ok(chunks
+        .into_iter()
+        .map(|chunk| VadChunk {
+            index: chunk.index,
+            start_seconds: chunk.start_seconds,
+            end_seconds: chunk.end_seconds,
+            duration_seconds: chunk.duration_seconds,
+            path: chunk.path,
+        })
+        .collect())
+}
+
 #[pyfunction(name = "decode_info")]
 fn decode_info_py(audio_bytes: &[u8]) -> PyResult<AudioInfo> {
     let decoded = api::decode(audio_bytes).map_err(to_py_err)?;
@@ -326,12 +410,14 @@ fn opus_sm(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Segment>()?;
     m.add_class::<AnalysisResult>()?;
     m.add_class::<SegmentationResult>()?;
+    m.add_class::<VadChunk>()?;
 
     m.add_function(wrap_pyfunction!(analyze_bytes_py, m)?)?;
     m.add_function(wrap_pyfunction!(segment_bytes_py, m)?)?;
     m.add_function(wrap_pyfunction!(classify_bytes_py, m)?)?;
     m.add_function(wrap_pyfunction!(music_score_bytes_py, m)?)?;
     m.add_function(wrap_pyfunction!(strip_music_bytes_py, m)?)?;
+    m.add_function(wrap_pyfunction!(vad_bytes_py, m)?)?;
     m.add_function(wrap_pyfunction!(decode_info_py, m)?)?;
 
     m.add("ROW_DECISION_MAX", "max")?;
