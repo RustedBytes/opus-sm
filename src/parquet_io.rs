@@ -3,12 +3,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail};
+use arrow_array::builder::BooleanBufferBuilder;
 use arrow_array::cast::AsArray;
 use arrow_array::{
     Array, ArrayRef, BinaryArray, BinaryViewArray, Float32Array, Float64Array, LargeBinaryArray,
     LargeStringArray, RecordBatch, RecordBatchReader, StringArray, StringViewArray, StructArray,
     UInt32Array,
 };
+use arrow_buffer::NullBuffer;
 use arrow_schema::DataType;
 use arrow_select::take::take;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -627,15 +629,18 @@ fn rebuild_audio_struct_from_indices(
         columns.push(column);
     }
 
-    let nulls = match original.nulls() {
-        Some(_) => {
-            let taken = take(original, indices, None).context("take audio struct nulls")?;
-            taken.as_struct().nulls().cloned()
-        }
-        None => None,
-    };
+    let nulls = take_nulls(original.nulls(), indices);
 
     Ok(StructArray::new(original.fields().clone(), columns, nulls))
+}
+
+fn take_nulls(nulls: Option<&NullBuffer>, indices: &UInt32Array) -> Option<NullBuffer> {
+    let nulls = nulls?;
+    let mut builder = BooleanBufferBuilder::new(indices.len());
+    for index in indices.values() {
+        builder.append(nulls.is_valid(*index as usize));
+    }
+    Some(builder.into())
 }
 
 fn build_binary_array(data_type: &DataType, values: &[Option<Vec<u8>>]) -> Result<ArrayRef> {

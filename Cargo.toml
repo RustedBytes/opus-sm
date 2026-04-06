@@ -14,6 +14,7 @@ python = ["dep:pyo3"]
 anyhow = "1.0.102"
 audiopus_sys = { version = "0.2.2", features = ["static"] }
 arrow-array = "58.1.0"
+arrow-buffer = "58.1.0"
 arrow-schema = "58.1.0"
 arrow-select = "58.1.0"
 clap = { version = "4.6.0", features = ["derive"] }
