@@ -30,7 +30,10 @@ pub fn analyze_bytes(bytes: &[u8], options: AnalysisOptions) -> Result<AudioAnal
     })
 }
 
-pub fn analyze_decoded(audio: &DecodedAudio, options: AnalysisOptions) -> Result<Vec<FrameProbability>> {
+pub fn analyze_decoded(
+    audio: &DecodedAudio,
+    options: AnalysisOptions,
+) -> Result<Vec<FrameProbability>> {
     analyze_audio(audio, options)
 }
 

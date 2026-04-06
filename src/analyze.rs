@@ -79,7 +79,10 @@ pub fn analyze_interleaved(
     let analyzer = Analyzer::new(48_000)?;
     for frame_index in 0..frame_count {
         let start = frame_index * frame_stride;
-        let available = analysis_samples.len().saturating_sub(start).min(frame_stride);
+        let available = analysis_samples
+            .len()
+            .saturating_sub(start)
+            .min(frame_stride);
         let mut frame = vec![0.0_f32; frame_stride];
         if available > 0 {
             frame[..available].copy_from_slice(&analysis_samples[start..start + available]);
@@ -146,7 +149,10 @@ pub fn row_is_music(probabilities: &[FrameProbability], options: DecisionOptions
     }
 }
 
-pub fn speech_ranges(probabilities: &[FrameProbability], options: DecisionOptions) -> Vec<(f64, f64)> {
+pub fn speech_ranges(
+    probabilities: &[FrameProbability],
+    options: DecisionOptions,
+) -> Vec<(f64, f64)> {
     segment(probabilities, options)
         .into_iter()
         .filter(|segment| segment.kind == SegmentKind::Speech)
@@ -154,7 +160,10 @@ pub fn speech_ranges(probabilities: &[FrameProbability], options: DecisionOption
         .collect()
 }
 
-fn classify_frames(probabilities: &[FrameProbability], options: DecisionOptions) -> Vec<SegmentKind> {
+fn classify_frames(
+    probabilities: &[FrameProbability],
+    options: DecisionOptions,
+) -> Vec<SegmentKind> {
     let mut labels = Vec::with_capacity(probabilities.len());
     let mut current = if probabilities[0].music_probability >= options.high_threshold {
         SegmentKind::Music
@@ -165,8 +174,12 @@ fn classify_frames(probabilities: &[FrameProbability], options: DecisionOptions)
 
     for frame in probabilities.iter().skip(1) {
         current = match current {
-            SegmentKind::Speech if frame.music_probability >= options.high_threshold => SegmentKind::Music,
-            SegmentKind::Music if frame.music_probability <= options.low_threshold => SegmentKind::Speech,
+            SegmentKind::Speech if frame.music_probability >= options.high_threshold => {
+                SegmentKind::Music
+            }
+            SegmentKind::Music if frame.music_probability <= options.low_threshold => {
+                SegmentKind::Speech
+            }
             _ => current,
         };
         labels.push(current);
@@ -200,7 +213,11 @@ fn merge_short_runs(labels: &mut [SegmentKind], options: DecisionOptions) {
 
         if min_len > 0 && len < min_len {
             let replacement = if start == 0 {
-                if end < labels.len() { labels[end] } else { current }
+                if end < labels.len() {
+                    labels[end]
+                } else {
+                    current
+                }
             } else {
                 labels[start - 1]
             };
@@ -248,7 +265,10 @@ fn smooth_probabilities(probabilities: &mut [FrameProbability], window: usize) {
         let end = (index + radius + 1).min(original.len());
         let slice = &original[start..end];
         let sum_music = slice.iter().map(|item| item.music_probability).sum::<f32>();
-        let sum_activity = slice.iter().map(|item| item.activity_probability).sum::<f32>();
+        let sum_activity = slice
+            .iter()
+            .map(|item| item.activity_probability)
+            .sum::<f32>();
         frame.music_probability = sum_music / slice.len() as f32;
         frame.activity_probability = sum_activity / slice.len() as f32;
     }

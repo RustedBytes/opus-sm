@@ -24,13 +24,12 @@ pub fn run_analyze(args: &AnalyzeArgs) -> Result<()> {
     for input_path in collect_parquet_files(&args.input.input)? {
         let mut reader = open_reader(&input_path, args.input.batch_size)?;
         for batch in &mut reader {
-            let batch = batch.with_context(|| format!("read batch from {}", input_path.display()))?;
+            let batch =
+                batch.with_context(|| format!("read batch from {}", input_path.display()))?;
             let audio = AudioColumns::new(&batch)?;
             let rows = analyze_batch_rows(&audio, analysis, &input_path)?;
-            for row in rows {
-                if let Some(probabilities) = row {
-                    print_probabilities(&input_path, probabilities.row, &probabilities.frames);
-                }
+            for probabilities in rows.into_iter().flatten() {
+                print_probabilities(&input_path, probabilities.row, &probabilities.frames);
             }
         }
     }
@@ -44,7 +43,8 @@ pub fn run_segment(args: &SegmentArgs) -> Result<()> {
     for input_path in collect_parquet_files(&args.input.input)? {
         let mut reader = open_reader(&input_path, args.input.batch_size)?;
         for batch in &mut reader {
-            let batch = batch.with_context(|| format!("read batch from {}", input_path.display()))?;
+            let batch =
+                batch.with_context(|| format!("read batch from {}", input_path.display()))?;
             let audio = AudioColumns::new(&batch)?;
             let rows = analyze_batch_rows(&audio, analysis, &input_path)?;
             for row in rows {
@@ -89,11 +89,12 @@ pub fn run_strip_music(args: &StripMusicArgs) -> Result<()> {
         let schema = reader.schema().clone();
         let output = File::create(&output_path)
             .with_context(|| format!("create output file {}", output_path.display()))?;
-        let mut writer =
-            ArrowWriter::try_new(output, schema, None).with_context(|| format!("open {}", output_path.display()))?;
+        let mut writer = ArrowWriter::try_new(output, schema, None)
+            .with_context(|| format!("open {}", output_path.display()))?;
 
         for batch in &mut reader {
-            let batch = batch.with_context(|| format!("read batch from {}", input_path.display()))?;
+            let batch =
+                batch.with_context(|| format!("read batch from {}", input_path.display()))?;
             let stripped = strip_batch(&batch, analysis, decision, args.strip.fade_ms)
                 .with_context(|| format!("strip music in {}", input_path.display()))?;
             writer
@@ -126,20 +127,23 @@ pub fn run_separate_sm(args: &SeparateSmArgs) -> Result<()> {
         let mut reader = open_reader(&input_path, args.input.batch_size)?;
         let schema = reader.schema().clone();
         let mut speech_writer = ArrowWriter::try_new(
-            File::create(&speech_path).with_context(|| format!("create {}", speech_path.display()))?,
+            File::create(&speech_path)
+                .with_context(|| format!("create {}", speech_path.display()))?,
             schema.clone(),
             None,
         )
         .with_context(|| format!("open {}", speech_path.display()))?;
         let mut music_writer = ArrowWriter::try_new(
-            File::create(&music_path).with_context(|| format!("create {}", music_path.display()))?,
+            File::create(&music_path)
+                .with_context(|| format!("create {}", music_path.display()))?,
             schema,
             None,
         )
         .with_context(|| format!("open {}", music_path.display()))?;
 
         for batch in &mut reader {
-            let batch = batch.with_context(|| format!("read batch from {}", input_path.display()))?;
+            let batch =
+                batch.with_context(|| format!("read batch from {}", input_path.display()))?;
             let (speech_batch, music_batch) = classify_batch(&batch, analysis, decision)
                 .with_context(|| format!("classify rows in {}", input_path.display()))?;
 
@@ -257,8 +261,8 @@ fn process_strip_row(
     };
 
     let decoded = decode_audio(bytes).with_context(|| format!("decode audio row {row}"))?;
-    let stripped =
-        strip_music(&decoded, decision, analysis, fade_ms).with_context(|| format!("strip music row {row}"))?;
+    let stripped = strip_music(&decoded, decision, analysis, fade_ms)
+        .with_context(|| format!("strip music row {row}"))?;
     let encoded = encode_audio(&decoded, &stripped).with_context(|| format!("encode row {row}"))?;
     Ok(StripRowOutput {
         bytes: Some(encoded),
@@ -277,7 +281,8 @@ fn classify_row(
     };
 
     let decoded = decode_audio(bytes).with_context(|| format!("decode audio row {row}"))?;
-    let probabilities = analyze_audio(&decoded, analysis).with_context(|| format!("analyze audio row {row}"))?;
+    let probabilities =
+        analyze_audio(&decoded, analysis).with_context(|| format!("analyze audio row {row}"))?;
     Ok(if row_is_music(&probabilities, decision) {
         RowKind::Music
     } else {
@@ -311,7 +316,11 @@ fn rebuild_batch(
     RecordBatch::try_new(batch.schema(), columns).context("build output batch")
 }
 
-fn print_probabilities(input_path: &Path, row: usize, probabilities: &[crate::analyze::FrameProbability]) {
+fn print_probabilities(
+    input_path: &Path,
+    row: usize,
+    probabilities: &[crate::analyze::FrameProbability],
+) {
     for frame in probabilities {
         println!(
             "FRAME\t{}\t{}\t{}\t{:.3}\t{:.3}\t{:.6}\t{:.6}",
@@ -374,7 +383,10 @@ fn decision_options(args: &DecisionArgs) -> Result<DecisionOptions> {
     })
 }
 
-fn open_reader(input_path: &Path, batch_size: usize) -> Result<parquet::arrow::arrow_reader::ParquetRecordBatchReader> {
+fn open_reader(
+    input_path: &Path,
+    batch_size: usize,
+) -> Result<parquet::arrow::arrow_reader::ParquetRecordBatchReader> {
     let input = File::open(input_path).with_context(|| format!("open {}", input_path.display()))?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(input)
         .with_context(|| format!("open parquet reader for {}", input_path.display()))?
@@ -415,9 +427,13 @@ fn map_output_path(input_root: &Path, output_root: &Path, input_path: &Path) -> 
     if input_root.is_file() {
         return Ok(output_root.to_path_buf());
     }
-    let relative = input_path
-        .strip_prefix(input_root)
-        .with_context(|| format!("strip prefix {} from {}", input_root.display(), input_path.display()))?;
+    let relative = input_path.strip_prefix(input_root).with_context(|| {
+        format!(
+            "strip prefix {} from {}",
+            input_root.display(),
+            input_path.display()
+        )
+    })?;
     Ok(output_root.join(relative))
 }
 
@@ -478,7 +494,11 @@ impl<'a> AudioColumns<'a> {
     }
 }
 
-fn rebuild_audio_struct(original: &StructArray, new_bytes: ArrayRef, new_path: ArrayRef) -> Result<StructArray> {
+fn rebuild_audio_struct(
+    original: &StructArray,
+    new_bytes: ArrayRef,
+    new_path: ArrayRef,
+) -> Result<StructArray> {
     let mut columns = Vec::with_capacity(original.num_columns());
     for field in original.fields() {
         let column = match field.name().as_str() {
@@ -501,13 +521,15 @@ fn rebuild_audio_struct(original: &StructArray, new_bytes: ArrayRef, new_path: A
 
 fn build_binary_array(data_type: &DataType, values: &[Option<Vec<u8>>]) -> Result<ArrayRef> {
     let array: ArrayRef = match data_type {
-        DataType::Binary => Arc::new(BinaryArray::from_iter(values.iter().map(|value| value.as_deref()))),
-        DataType::LargeBinary => {
-            Arc::new(LargeBinaryArray::from_iter(values.iter().map(|value| value.as_deref())))
-        }
-        DataType::BinaryView => {
-            Arc::new(BinaryViewArray::from_iter(values.iter().map(|value| value.as_deref())))
-        }
+        DataType::Binary => Arc::new(BinaryArray::from_iter(
+            values.iter().map(|value| value.as_deref()),
+        )),
+        DataType::LargeBinary => Arc::new(LargeBinaryArray::from_iter(
+            values.iter().map(|value| value.as_deref()),
+        )),
+        DataType::BinaryView => Arc::new(BinaryViewArray::from_iter(
+            values.iter().map(|value| value.as_deref()),
+        )),
         other => bail!("unsupported audio bytes type: {other:?}"),
     };
     Ok(array)
@@ -515,13 +537,15 @@ fn build_binary_array(data_type: &DataType, values: &[Option<Vec<u8>>]) -> Resul
 
 fn build_string_array(data_type: &DataType, values: &[Option<String>]) -> Result<ArrayRef> {
     let array: ArrayRef = match data_type {
-        DataType::Utf8 => Arc::new(StringArray::from_iter(values.iter().map(|value| value.as_deref()))),
-        DataType::LargeUtf8 => {
-            Arc::new(LargeStringArray::from_iter(values.iter().map(|value| value.as_deref())))
-        }
-        DataType::Utf8View => {
-            Arc::new(StringViewArray::from_iter(values.iter().map(|value| value.as_deref())))
-        }
+        DataType::Utf8 => Arc::new(StringArray::from_iter(
+            values.iter().map(|value| value.as_deref()),
+        )),
+        DataType::LargeUtf8 => Arc::new(LargeStringArray::from_iter(
+            values.iter().map(|value| value.as_deref()),
+        )),
+        DataType::Utf8View => Arc::new(StringViewArray::from_iter(
+            values.iter().map(|value| value.as_deref()),
+        )),
         other => bail!("unsupported audio path type: {other:?}"),
     };
     Ok(array)

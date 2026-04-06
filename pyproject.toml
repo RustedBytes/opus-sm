@@ -1,0 +1,28 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "opus-sm"
+version = "0.1.0"
+description = "Python bindings for the opus-sm speech-vs-music analyzer built on the Opus codec discriminator."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Topic :: Multimedia :: Sound/Audio :: Analysis",
+]
+
+[tool.maturin]
+features = ["python"]
+module-name = "opus_sm"
+bindings = "pyo3"
+
+[dependency-groups]
+dev = [
+    "maturin>=1.7,<2.0",
+    "ruff>=0.15.9",
+]

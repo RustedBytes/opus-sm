@@ -5,7 +5,9 @@ use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
 use ogg::PacketReader;
 use opus::{Application, Channels, Decoder, Encoder, Signal};
 
-use crate::analyze::{AnalysisOptions, DecisionOptions, FrameProbability, analyze_interleaved, speech_ranges};
+use crate::analyze::{
+    AnalysisOptions, DecisionOptions, FrameProbability, analyze_interleaved, speech_ranges,
+};
 
 const OPUS_SAMPLE_RATE: u32 = 48_000;
 const OPUS_FRAME_SAMPLES: usize = 960;
@@ -41,7 +43,10 @@ pub fn decode_audio(bytes: &[u8]) -> Result<DecodedAudio> {
     }
 }
 
-pub fn analyze_audio(audio: &DecodedAudio, options: AnalysisOptions) -> Result<Vec<FrameProbability>> {
+pub fn analyze_audio(
+    audio: &DecodedAudio,
+    options: AnalysisOptions,
+) -> Result<Vec<FrameProbability>> {
     let analysis_samples = if audio.sample_rate == OPUS_SAMPLE_RATE {
         audio.samples.clone()
     } else {
@@ -123,7 +128,8 @@ fn decode_wav(bytes: &[u8]) -> Result<DecodedAudio> {
         SampleFormat::Int => {
             let scale = pcm_scale(spec.bits_per_sample)?;
             for sample in reader.samples::<i32>() {
-                samples.push((sample.context("read wav int sample")? as f32 / scale).clamp(-1.0, 1.0));
+                samples
+                    .push((sample.context("read wav int sample")? as f32 / scale).clamp(-1.0, 1.0));
             }
         }
     }
@@ -226,19 +232,25 @@ fn encode_wav(samples: &[f32], spec: WavSpec) -> Result<Vec<u8>> {
             (SampleFormat::Int, 16) => {
                 for &sample in samples {
                     let pcm = (sample.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16;
-                    writer.write_sample(pcm).context("write wav 16-bit sample")?;
+                    writer
+                        .write_sample(pcm)
+                        .context("write wav 16-bit sample")?;
                 }
             }
             (SampleFormat::Int, 24) => {
                 for &sample in samples {
                     let pcm = (sample.clamp(-1.0, 1.0) * 8_388_607.0).round() as i32;
-                    writer.write_sample(pcm).context("write wav 24-bit sample")?;
+                    writer
+                        .write_sample(pcm)
+                        .context("write wav 24-bit sample")?;
                 }
             }
             (SampleFormat::Int, 32) => {
                 for &sample in samples {
                     let pcm = (sample.clamp(-1.0, 1.0) * i32::MAX as f32).round() as i32;
-                    writer.write_sample(pcm).context("write wav 32-bit sample")?;
+                    writer
+                        .write_sample(pcm)
+                        .context("write wav 32-bit sample")?;
                 }
             }
             _ => bail!(
@@ -262,9 +274,11 @@ fn encode_ogg_opus(samples: &[f32], channels: usize) -> Result<Vec<u8>> {
     } else {
         Channels::Stereo
     };
-    let mut encoder =
-        Encoder::new(OPUS_SAMPLE_RATE, opus_channels, Application::Audio).context("create opus encoder")?;
-    encoder.set_signal(Signal::Voice).context("set opus signal hint")?;
+    let mut encoder = Encoder::new(OPUS_SAMPLE_RATE, opus_channels, Application::Audio)
+        .context("create opus encoder")?;
+    encoder
+        .set_signal(Signal::Voice)
+        .context("set opus signal hint")?;
 
     let frame_len = OPUS_FRAME_SAMPLES * channels;
     let mut frame = vec![0.0_f32; frame_len];
@@ -305,8 +319,7 @@ pub fn resample_linear_interleaved(
     }
 
     let input_frames = samples.len() / channels;
-    let output_frames =
-        ((input_frames as u128 * output_rate as u128) + input_rate as u128 - 1) / input_rate as u128;
+    let output_frames = (input_frames as u128 * output_rate as u128).div_ceil(input_rate as u128);
     let output_frames = output_frames as usize;
     let mut output = vec![0.0_f32; output_frames * channels];
 
@@ -322,7 +335,8 @@ pub fn resample_linear_interleaved(
         for channel in 0..channels {
             let left_sample = samples[left * channels + channel];
             let right_sample = samples[right * channels + channel];
-            output[frame_index * channels + channel] = left_sample + (right_sample - left_sample) * alpha;
+            output[frame_index * channels + channel] =
+                left_sample + (right_sample - left_sample) * alpha;
         }
     }
 
@@ -393,12 +407,21 @@ struct OpusHead {
     pre_skip: u16,
 }
 
-fn pack_ogg_opus(packets: &[Vec<u8>], channels: Channels, total_frames: usize, output: &mut Vec<u8>) {
+fn pack_ogg_opus(
+    packets: &[Vec<u8>],
+    channels: Channels,
+    total_frames: usize,
+    output: &mut Vec<u8>,
+) {
     let mut sequence = 0_u32;
     let mut opus_head = Vec::with_capacity(19);
     opus_head.extend_from_slice(b"OpusHead");
     opus_head.push(1);
-    opus_head.push(if matches!(channels, Channels::Mono) { 1 } else { 2 });
+    opus_head.push(if matches!(channels, Channels::Mono) {
+        1
+    } else {
+        2
+    });
     opus_head.extend_from_slice(&0_u16.to_le_bytes());
     opus_head.extend_from_slice(&OPUS_SAMPLE_RATE.to_le_bytes());
     opus_head.extend_from_slice(&0_i16.to_le_bytes());

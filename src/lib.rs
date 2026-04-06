@@ -3,6 +3,8 @@ pub mod api;
 pub mod audio;
 pub mod cli;
 pub mod parquet_io;
+#[cfg(feature = "python")]
+pub mod python;
 
 pub use analyze::{
     AnalysisOptions, DecisionOptions, FrameProbability, RowDecisionMode, Segment, SegmentKind,

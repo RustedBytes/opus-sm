@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 fn main() {
     println!("cargo:rerun-if-changed=native/opus_sm_wrapper.c");
 
-    let opus_root = find_audiopus_opus_root().expect("failed to locate audiopus_sys bundled opus source");
+    let opus_root =
+        find_audiopus_opus_root().expect("failed to locate audiopus_sys bundled opus source");
     let include_dir = opus_root.join("include");
     let src_dir = opus_root.join("src");
     let celt_dir = opus_root.join("celt");
