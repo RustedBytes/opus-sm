@@ -1,0 +1,197 @@
+name: Build & Release on Tag
+
+on:
+  push:
+    tags:
+      - "*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-and-release-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  BINARY_NAME: opus-sm
+
+jobs:
+  verify:
+    name: Verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: verify
+
+      - name: Run test suite
+        run: cargo test --locked --all-targets
+
+      - name: Verify optional Python bindings build
+        run: cargo check --locked --features python
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive_ext: tar.gz
+            binary_relpath: target/x86_64-unknown-linux-gnu/release/opus-sm
+          - os: macos-13
+            target: x86_64-apple-darwin
+            archive_ext: tar.gz
+            binary_relpath: target/x86_64-apple-darwin/release/opus-sm
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --locked --release --target ${{ matrix.target }}
+
+      - name: Prepare packaged artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version="${GITHUB_REF_NAME}"
+          staging_dir="${BINARY_NAME}-${version}-${{ matrix.target }}"
+          mkdir -p "$staging_dir"
+          cp "${{ matrix.binary_relpath }}" "$staging_dir/"
+          cp README.md "$staging_dir/"
+
+          if [[ "${{ matrix.archive_ext }}" == "zip" ]]; then
+            7z a "${staging_dir}.zip" "$staging_dir" >/dev/null
+            archive_path="${staging_dir}.zip"
+          else
+            tar -czf "${staging_dir}.tar.gz" "$staging_dir"
+            archive_path="${staging_dir}.tar.gz"
+          fi
+
+          sha256sum "$archive_path" > "${archive_path}.sha256"
+
+      - name: Upload packaged artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            ${{ env.BINARY_NAME }}-${{ github.ref_name }}-${{ matrix.target }}.${{ matrix.archive_ext }}
+            ${{ env.BINARY_NAME }}-${{ github.ref_name }}-${{ matrix.target }}.${{ matrix.archive_ext }}.sha256
+          if-no-files-found: error
+
+  python-distributions:
+    name: Python ${{ matrix.os }} py${{ matrix.python-version }}
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python-version: "3.10"
+          - os: ubuntu-latest
+            python-version: "3.11"
+          - os: ubuntu-latest
+            python-version: "3.12"
+          - os: ubuntu-latest
+            python-version: "3.13"
+          - os: macos-13
+            python-version: "3.10"
+          - os: macos-13
+            python-version: "3.11"
+          - os: macos-13
+            python-version: "3.12"
+          - os: macos-13
+            python-version: "3.13"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          args: --release --out dist --interpreter python --features python
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ runner.os }}-py${{ matrix.python-version }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  python-sdist:
+    name: Python source distribution
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Build source distribution
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+
+      - name: Upload source distribution
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub release
+    needs:
+      - build
+      - python-distributions
+      - python-sdist
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Download packaged artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/**/*.tar.gz
+            dist/**/*.tar.gz.sha256
+            dist/**/*.zip
+            dist/**/*.zip.sha256
+            dist/**/*.whl
